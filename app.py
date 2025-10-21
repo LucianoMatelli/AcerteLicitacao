@@ -11,7 +11,7 @@ from typing import Dict, List, Tuple
 # ==========================
 # Configuração básica
 # ==========================
-st.set_page_config(page_title="Acerte Licitações — O seu Buscador de Editais", layout="wide")
+st.set_page_config(page_title="PNCP — Buscador de Editais", layout="wide")
 
 BASE_API = "https://pncp.gov.br/api/search/"
 ORIGIN = "https://pncp.gov.br"
@@ -183,13 +183,13 @@ def coletar_todos_os_municipios(
 # ==========================
 # UI
 # ==========================
-st.title("📑 Acerte Licitações — O seu Buscador de Editais")
+st.title("📑 PNCP — Buscador de Editais (API)")
 
 with st.expander("ℹ️ Como funciona?", expanded=False):
     st.markdown(
-        "- Busca diretamente no endpoint **/api/search** do Portal Nacional de Contratações Públicas - PNCP.\n"
-        "- Junta os resultados de todos os municípios pré selecionados.\n"
-        "- Os campos exibidos vêm da própria API oficial do governo."
+        "- Busca diretamente no endpoint **/api/search** do PNCP.\n"
+        "- Junta os resultados de todos os municípios configurados abaixo.\n"
+        "- Os campos exibidos vêm da própria API (quando disponíveis)."
     )
 
 col_a, col_b, col_c = st.columns([2, 1.2, 1.2])
@@ -201,6 +201,12 @@ with col_a:
         help="Recomendo 'recebendo_proposta' para editais abertos.",
     )
 with col_b:
+    tam_pagina = st.number_input(
+        "Tamanho da página (API)",
+        min_value=10, max_value=200, value=100, step=10,
+        help="Quantidade por requisição ao PNCP."
+    )
+with col_c:
     filtro_texto = st.text_input(
         "Filtro (busca por palavras no título/descrição, opcional)",
         value="",
