@@ -140,7 +140,7 @@ def montar_registro(item: Dict) -> Dict:
         "uf": item.get("uf", ""),
         "Title": item.get("title", ""),
         "description": item.get("description", ""),
-        "item_url": _build_pncp_link(item),  # link correto clicável
+        "item_url": _build_pncp_link(item),  # link correto
         "document_type": item.get("document_type", ""),
         "orgao_nome": item.get("orgao_nome", ""),
         "unidade_nome": item.get("unidade_nome", ""),
