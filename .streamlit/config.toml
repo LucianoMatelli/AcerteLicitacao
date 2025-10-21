@@ -1,0 +1,8 @@
+[server]
+headless = true
+enableXsrfProtection = true
+port = 8501
+
+[theme]
+base = "light"
+primaryColor = "#0F766E"
