@@ -192,7 +192,7 @@ with st.expander("ℹ️ Como funciona?", expanded=False):
         "- Os campos exibidos vêm da própria API (quando disponíveis)."
     )
 
-col_a, col_b, col_c = st.columns([2, 1.2, 1.2])
+col_a, col_b, = st.columns([2, 1.2])
 with col_a:
     status = st.selectbox(
         "Status (PNCP)",
