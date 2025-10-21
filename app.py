@@ -188,7 +188,7 @@ st.title("📑 Acerte Licitações — O seu Buscador de Editais")
 with st.expander("ℹ️ Como funciona?", expanded=False):
     st.markdown(
         "- Busca diretamente no endpoint **/api/search** do PNCP - Portal Nacional de Contratações Públicas"
-        "- Retorna as informações de todos os editais dos municípios
+        "- Retorna as informações de todos os editais dos municípios"
         "- Os campos exibidos vêm da própria API oficial do governo."
     )
 
