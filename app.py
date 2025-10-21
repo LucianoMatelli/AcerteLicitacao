@@ -11,7 +11,7 @@ from typing import Dict, List, Tuple
 # ==========================
 # Configuração básica
 # ==========================
-st.set_page_config(page_title="PNCP — Buscador de Editais", layout="wide")
+st.set_page_config(page_title="Acerte Licitações — O seu Buscador de Editais", layout="wide")
 
 BASE_API = "https://pncp.gov.br/api/search/"
 ORIGIN = "https://pncp.gov.br"
@@ -183,7 +183,7 @@ def coletar_todos_os_municipios(
 # ==========================
 # UI
 # ==========================
-st.title("📑 PNCP — Buscador de Editais (API)")
+st.title("📑 Acerte Licitações — O seu Buscador de Editais")
 
 with st.expander("ℹ️ Como funciona?", expanded=False):
     st.markdown(
