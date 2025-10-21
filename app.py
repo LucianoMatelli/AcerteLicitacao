@@ -12,7 +12,7 @@ from typing import Dict, List, Tuple
 # Configuração básica
 # ==========================
 st.set_page_config(
-    page_title="Acerte Licitações — O seu Buscador de Editais",
+    page_title="📑 Acerte Licitações — O seu Buscador de Editais",
     page_icon="📑",
     layout="wide",
 )
@@ -28,7 +28,7 @@ HEADERS = {
     "Referer": "https://pncp.gov.br/app/editais",
     "Accept-Language": "pt-BR,pt;q=0.9",
 }
-TAM_PAGINA_FIXO = 100  # usamos um valor fixo para a API
+TAM_PAGINA_FIXO = 100  # valor fixo para a API
 
 # ==========================
 # Municípios padrão
@@ -159,6 +159,7 @@ def montar_registro(item: Dict) -> Dict:
 def coletar_todos_os_municipios(
     municipios: List[Dict[str, str]],
     status: str,
+    progress: st.delta_generator.DeltaGenerator | None = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     registros: List[Dict] = []
     falhas: List[Dict] = []
@@ -169,16 +170,22 @@ def coletar_todos_os_municipios(
         codigo = mun.get("codigo", "")
         if not codigo:
             falhas.append({"municipio": nome, "motivo": "Sem código PNCP"})
+            if progress:
+                progress.progress(i / total, text=f"Pulando {nome} (sem código)…")
             continue
 
-        with st.spinner(f"Consultando {nome} ({codigo}) [{i}/{total}]…"):
-            try:
-                itens = consultar_pncp_por_municipio(codigo, status=status, tam_pagina=TAM_PAGINA_FIXO)
-                for it in itens:
-                    registros.append(montar_registro(it))
-                st.success(f"{nome}: {len(itens)} item(ns) encontrado(s).")
-            except Exception as e:
-                falhas.append({"municipio": nome, "motivo": str(e)})
+        if progress:
+            progress.progress(i / total, text=f"Consultando {nome}…")
+
+        try:
+            itens = consultar_pncp_por_municipio(codigo, status=status, tam_pagina=TAM_PAGINA_FIXO)
+            for it in itens:
+                registros.append(montar_registro(it))
+        except Exception as e:
+            falhas.append({"municipio": nome, "motivo": str(e)})
+
+    if progress:
+        progress.progress(1.0, text="Finalizando…")
 
     df_ok = pd.DataFrame(registros)
     df_fail = pd.DataFrame(falhas)
@@ -187,16 +194,16 @@ def coletar_todos_os_municipios(
 # ==========================
 # UI
 # ==========================
-st.title("Acerte Licitações — O seu Buscador de Editais")
+st.title("📑 Acerte Licitações — O seu Buscador de Editais")
 
 with st.expander("ℹ️ Como funciona?", expanded=False):
     st.markdown(
         "- Busca diretamente no endpoint **/api/search** do PNCP.\n"
-        "- Junta os resultados de todos os municípios configurados abaixo.\n"
+        "- Junta os resultados de todos os municípios configurados.\n"
         "- Os campos exibidos vêm da própria API (quando disponíveis)."
     )
 
-# controles no topo (sem tamanho de página)
+# Controles (sem tamanho de página)
 col1, col2 = st.columns([1.2, 2])
 with col1:
     status = st.selectbox(
@@ -212,14 +219,20 @@ with col2:
         placeholder="ex.: material gráfico, merenda…",
     )
 
-btn = st.button("🔎 Executar busca", type="primary")
+executar = st.button("🔎 Executar busca", type="primary")
 
-# --- Resultados primeiro ---
-if btn:
+# --- Fluxo com barra de progresso; tabela só aparece ao concluir ---
+if executar:
     t0 = time.time()
-    df, df_fail = coletar_todos_os_municipios(MUNICIPIOS_PADRAO, status=status)
+    progress = st.progress(0, text="Iniciando…")
 
-    # remover colunas herdadas antigas, se existirem
+    # coleta
+    df, df_fail = coletar_todos_os_municipios(MUNICIPIOS_PADRAO, status=status, progress=progress)
+
+    # limpar barra quando terminar
+    progress.empty()
+
+    # remover colunas antigas, se existirem
     for drop_col in ["hora_encerramento", "encerramento_envio_proposta"]:
         if drop_col in df.columns:
             df = df.drop(columns=[drop_col])
@@ -258,7 +271,7 @@ if btn:
     }
     df = df.rename(columns=rename_map)
 
-    # ordem preferida
+    # ordem de exibição
     desired_order = [
         "Cidade", "UF", "Título", "Objeto", "Link para o edital",
         "Modalidade", "Tipo", "Tipo (documento)", "Orgão", "Unidade",
@@ -266,6 +279,7 @@ if btn:
     ]
     df = df[[c for c in desired_order if c in df.columns]]
 
+    # --- Resultados ---
     st.subheader(f"Resultados ({len(df)})")
     if df.empty:
         st.info("Nenhum resultado encontrado com os critérios atuais.")
@@ -282,7 +296,7 @@ if btn:
             },
         )
 
-        # --- Destaque para XLSX (CSV removido) ---
+        # Download XLSX (CSV removido)
         xlsx_buf = io.BytesIO()
         with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as wr:
             df.to_excel(wr, index=False, sheet_name="PNCP")
@@ -304,7 +318,3 @@ if btn:
         st.dataframe(df_fail, use_container_width=True, hide_index=True)
 
     st.caption(f"⏱️ Tempo total: {time.time() - t0:.1f}s")
-
-# --- Lista de municípios depois (em expander) ---
-with st.expander("📍 Municípios consultados (nome — código PNCP)"):
-    st.code(", ".join([f"{m['nome']}({m['codigo']})" for m in MUNICIPIOS_PADRAO]), language="text")
