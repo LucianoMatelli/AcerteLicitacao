@@ -11,7 +11,11 @@ from typing import Dict, List, Tuple
 # ==========================
 # Configuração básica
 # ==========================
-st.set_page_config(page_title="PNCP — Buscador de Editais", layout="wide")
+st.set_page_config(
+    page_title="Acerte Licitações — O seu Buscador de Editais",
+    page_icon="📑",
+    layout="wide",
+)
 
 BASE_API = "https://pncp.gov.br/api/search/"
 ORIGIN = "https://pncp.gov.br"
@@ -24,6 +28,7 @@ HEADERS = {
     "Referer": "https://pncp.gov.br/app/editais",
     "Accept-Language": "pt-BR,pt;q=0.9",
 }
+TAM_PAGINA_FIXO = 100  # usamos um valor fixo para a API
 
 # ==========================
 # Municípios padrão
@@ -102,7 +107,7 @@ def _build_pncp_link(item: Dict) -> str:
 def consultar_pncp_por_municipio(
     municipio_id: str,
     status: str = "recebendo_proposta",
-    tam_pagina: int = 100,
+    tam_pagina: int = TAM_PAGINA_FIXO,
     delay_s: float = 0.05,
 ) -> List[Dict]:
     out: List[Dict] = []
@@ -154,7 +159,6 @@ def montar_registro(item: Dict) -> Dict:
 def coletar_todos_os_municipios(
     municipios: List[Dict[str, str]],
     status: str,
-    tam_pagina: int,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     registros: List[Dict] = []
     falhas: List[Dict] = []
@@ -169,7 +173,7 @@ def coletar_todos_os_municipios(
 
         with st.spinner(f"Consultando {nome} ({codigo}) [{i}/{total}]…"):
             try:
-                itens = consultar_pncp_por_municipio(codigo, status=status, tam_pagina=tam_pagina)
+                itens = consultar_pncp_por_municipio(codigo, status=status, tam_pagina=TAM_PAGINA_FIXO)
                 for it in itens:
                     registros.append(montar_registro(it))
                 st.success(f"{nome}: {len(itens)} item(ns) encontrado(s).")
@@ -183,7 +187,7 @@ def coletar_todos_os_municipios(
 # ==========================
 # UI
 # ==========================
-st.title("📑 PNCP — Buscador de Editais (API)")
+st.title("Acerte Licitações — O seu Buscador de Editais")
 
 with st.expander("ℹ️ Como funciona?", expanded=False):
     st.markdown(
@@ -192,42 +196,35 @@ with st.expander("ℹ️ Como funciona?", expanded=False):
         "- Os campos exibidos vêm da própria API (quando disponíveis)."
     )
 
-col_a, col_b, col_c = st.columns([2, 1.2, 1.2])
-with col_a:
+# controles no topo (sem tamanho de página)
+col1, col2 = st.columns([1.2, 2])
+with col1:
     status = st.selectbox(
         "Status (PNCP)",
         options=["recebendo_proposta", "divulgado", "em_andamento", "concluido", ""],
         index=0,
         help="Recomendo 'recebendo_proposta' para editais abertos.",
     )
-with col_b:
-    tam_pagina = st.number_input(
-        "Tamanho da página (API)",
-        min_value=10, max_value=200, value=100, step=10,
-        help="Quantidade por requisição ao PNCP."
-    )
-with col_c:
+with col2:
     filtro_texto = st.text_input(
         "Filtro (busca por palavras no título/descrição, opcional)",
         value="",
         placeholder="ex.: material gráfico, merenda…",
     )
 
-st.markdown("**Municípios (nome — código PNCP):**")
-st.code(", ".join([f"{m['nome']}({m['codigo']})" for m in MUNICIPIOS_PADRAO]), language="text")
-
 btn = st.button("🔎 Executar busca", type="primary")
 
+# --- Resultados primeiro ---
 if btn:
     t0 = time.time()
-    df, df_fail = coletar_todos_os_municipios(MUNICIPIOS_PADRAO, status=status, tam_pagina=tam_pagina)
+    df, df_fail = coletar_todos_os_municipios(MUNICIPIOS_PADRAO, status=status)
 
-    # Remover colunas opcionais antigas se existirem
+    # remover colunas herdadas antigas, se existirem
     for drop_col in ["hora_encerramento", "encerramento_envio_proposta"]:
         if drop_col in df.columns:
             df = df.drop(columns=[drop_col])
 
-    # Filtro simples por texto (título/descrição)
+    # filtro por texto (título/descrição)
     if filtro_texto.strip() and not df.empty:
         mask = (
             df["Title"].fillna("").str.contains(filtro_texto, case=False, na=False)
@@ -235,7 +232,7 @@ if btn:
         )
         df = df[mask].copy()
 
-    # Ordenar por data_publicacao_pncp (se houver)
+    # ordenar por data_publicacao_pncp
     if not df.empty and "data_publicacao_pncp" in df.columns:
         try:
             _tmp = pd.to_datetime(df["data_publicacao_pncp"], format="%d/%m/%Y %H:%M", errors="coerce")
@@ -243,7 +240,7 @@ if btn:
         except Exception:
             pass
 
-    # ===== Renomeação de colunas =====
+    # renomear colunas
     rename_map = {
         "municipio_nome": "Cidade",
         "uf": "UF",
@@ -261,7 +258,7 @@ if btn:
     }
     df = df.rename(columns=rename_map)
 
-    # Ordem de exibição sugerida
+    # ordem preferida
     desired_order = [
         "Cidade", "UF", "Título", "Objeto", "Link para o edital",
         "Modalidade", "Tipo", "Tipo (documento)", "Orgão", "Unidade",
@@ -273,7 +270,6 @@ if btn:
     if df.empty:
         st.info("Nenhum resultado encontrado com os critérios atuais.")
     else:
-        # DataFrame com link clicável
         st.dataframe(
             df,
             use_container_width=True,
@@ -286,34 +282,29 @@ if btn:
             },
         )
 
-        # --- Downloads (CSV / XLSX) ---
-        csv_bytes = df.to_csv(index=False).encode("utf-8")
+        # --- Destaque para XLSX (CSV removido) ---
         xlsx_buf = io.BytesIO()
         with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as wr:
             df.to_excel(wr, index=False, sheet_name="PNCP")
         xlsx_bytes = xlsx_buf.getvalue()
 
-        col_d, col_e = st.columns(2)
-        with col_d:
-            st.download_button(
-                "⬇️ Baixar CSV",
-                data=csv_bytes,
-                file_name="pncp_resultados.csv",
-                mime="text/csv",
-            )
-        with col_e:
-            st.download_button(
-                "⬇️ Baixar XLSX",
-                data=xlsx_bytes,
-                file_name="pncp_resultados.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+        st.markdown("### ⬇️ Baixar planilha")
+        st.download_button(
+            "Baixar XLSX",
+            data=xlsx_bytes,
+            file_name="pncp_resultados.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            type="primary",
+        )
 
-    # Falhas
+    # falhas (se houver)
     if not df_fail.empty:
         st.subheader("⚠️ Falhas")
         st.dataframe(df_fail, use_container_width=True, hide_index=True)
 
     st.caption(f"⏱️ Tempo total: {time.time() - t0:.1f}s")
-else:
-    st.info("Clique em **🔎 Executar busca** para iniciar a coleta.")
+
+# --- Lista de municípios depois (em expander) ---
+with st.expander("📍 Municípios consultados (nome — código PNCP)"):
+    st.code(", ".join([f"{m['nome']}({m['codigo']})" for m in MUNICIPIOS_PADRAO]), language="text")
