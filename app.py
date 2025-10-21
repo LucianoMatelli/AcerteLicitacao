@@ -201,12 +201,6 @@ with col_a:
         help="Recomendo 'recebendo_proposta' para editais abertos.",
     )
 with col_b:
-    tam_pagina = st.number_input(
-        "Tamanho da página (API)",
-        min_value=10, max_value=200, value=100, step=10,
-        help="Quantidade por requisição ao PNCP."
-    )
-with col_c:
     filtro_texto = st.text_input(
         "Filtro (busca por palavras no título/descrição, opcional)",
         value="",
