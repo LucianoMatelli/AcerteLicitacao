@@ -46,10 +46,9 @@ UFS = [
     "RJ", "RN", "RO", "RR", "RS", "SC", "SE", "SP", "TO",
 ]
 
-# Limites internos (não exibidos na UI)
 DEFAULT_PAGE_SIZE = 100
-DISCOVERY_PAGES = 5   # fallback para descobrir municípios pelo PNCP
-MAX_PAGES = 30        # para a busca final no PNCP
+DISCOVERY_PAGES = 5
+MAX_PAGES = 30
 
 # =======================
 # Estado / utilitários
@@ -63,9 +62,11 @@ if "muni_choices" not in st.session_state:
 if "muni_selected" not in st.session_state:
     st.session_state.muni_selected: List[str] = []
 
+if "last_added_muni" not in st.session_state:
+    st.session_state.last_added_muni = ""
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def _ibge_map_uf_sigla_to_id() -> Dict[str, int]:
-    """Cria um dicionário {sigla: id} para estados, via IBGE."""
     r = requests.get(IBGE_ESTADOS, timeout=TIMEOUT)
     r.raise_for_status()
     out = {}
@@ -78,7 +79,6 @@ def _ibge_map_uf_sigla_to_id() -> Dict[str, int]:
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def _ibge_municipios_por_uf(uf_sigla: str) -> List[str]:
-    """Lista nomes de municípios para a UF (via IBGE)."""
     uf_sigla = (uf_sigla or "").strip().upper()
     if not uf_sigla:
         return []
@@ -143,19 +143,22 @@ def fetch_page(
     page: int,
     page_size: int = DEFAULT_PAGE_SIZE,
     keyword: str = "",
-    status: str = "recebendo_proposta",
+    status_ui: str = "recebendo_proposta",  # valores: recebendo_proposta | divulgado | em_andamento | concluido
 ) -> Tuple[List[Dict], int]:
+    """
+    Primeiro tentamos com 'status' diretamente.
+    Se a API retornar 400/422, refazemos SEM status (fallback) e filtramos depois.
+    """
     # 1) API “clássica”
     params1 = {
         "tipos_documento": "edital",
         "pagina": page,
         "tam_pagina": page_size,
         "ordenacao": "-data",
+        "status": status_ui,
     }
     if uf:
         params1["uf"] = uf
-    if status:
-        params1["status"] = status
     if keyword:
         params1["termo"] = keyword
 
@@ -174,23 +177,41 @@ def fetch_page(
         "pagina": page,
         "tam_pagina": page_size,
         "ordenacao": "-data_publicacao_pncp",
+        "status": status_ui,
     }
     if uf:
         params2["uf"] = uf
     if keyword:
         params2["termo"] = keyword
-    if status:
-        params2["status"] = status
 
     r2 = requests.get(PNCP_API, params=params2, headers=HDRS, timeout=TIMEOUT)
-    r2.raise_for_status()
-    return _extract_items_total(r2.json())
+    if r2.status_code < 400:
+        return _extract_items_total(r2.json())
+
+    # 3) Fallback “sem status”
+    params3 = {
+        "index": "catalog2",
+        "doc_type": "_doc",
+        "document_type": "edital",
+        "pagina": page,
+        "tam_pagina": page_size,
+        "ordenacao": "-data_publicacao_pncp",
+    }
+    if uf:
+        params3["uf"] = uf
+    if keyword:
+        params3["termo"] = keyword
+
+    r3 = requests.get(PNCP_API, params=params3, headers=HDRS, timeout=TIMEOUT)
+    r3.raise_for_status()
+    return _extract_items_total(r3.json())
 
 def collect_results(
     uf: Optional[str],
     keyword: str = "",
     page_size: int = DEFAULT_PAGE_SIZE,
     max_pages: int = MAX_PAGES,
+    status_ui: str = "recebendo_proposta",
     progress_cb=None,
 ) -> List[Dict]:
     all_items: List[Dict] = []
@@ -198,7 +219,7 @@ def collect_results(
     total_known = None
 
     while page <= max_pages:
-        items, total = fetch_page(uf=uf, page=page, page_size=page_size, keyword=keyword)
+        items, total = fetch_page(uf=uf, page=page, page_size=page_size, keyword=keyword, status_ui=status_ui)
         if total_known is None:
             total_known = total
 
@@ -247,6 +268,7 @@ def normalize_item(item: dict) -> dict:
     tipo_nome = item.get("tipo_nome") or item.get("tipo") or ""
     municipio_nome = item.get("municipio_nome") or item.get("municipio") or ""
     uf = item.get("uf") or ""
+    situacao_nome = item.get("situacao_nome") or ""
 
     dt_pub = _parse_dt(item.get("data_publicacao_pncp") or item.get("dataPublicacao"))
     dt_fim = _parse_dt(item.get("data_fim_vigencia") or item.get("dataFimVigencia"))
@@ -267,6 +289,7 @@ def normalize_item(item: dict) -> dict:
         "Publicação": _fmt_br(dt_pub),
         "Fim do envio de proposta": _fmt_br(dt_fim),
         "Tipo (nome)": tipo_nome,
+        "Situação": situacao_nome,  # para pós-filtro quando necessário
         "_raw_item_url": item.get("item_url", ""),
     }
 
@@ -278,8 +301,14 @@ with st.sidebar:
     uf = st.selectbox("UF", UFS, index=UFS.index("SP"))
     keyword = st.text_input("Palavra-chave (opcional)", value="")
 
+    # Status do edital – exatamente como você pediu
+    st.markdown("#### Status do edital")
+    status_values = ["recebendo_proposta", "divulgado", "em_andamento", "concluido"]
+    status_ui = st.selectbox("Filtrar por status", status_values, index=0)
+
     st.divider()
     st.markdown("#### Municípios (IBGE)")
+
     # Recarrega lista de municípios automaticamente quando a UF muda
     try:
         if uf:
@@ -289,13 +318,13 @@ with st.sidebar:
         st.session_state.muni_choices = muni_choices
     except Exception as e:
         st.warning(f"IBGE indisponível ({e}). Tentando coletar municípios via PNCP…")
-        # Fallback: varre poucas páginas do PNCP para montar lista
         try:
             sample_items = collect_results(
                 uf=(uf or None),
                 keyword=(keyword or "").strip(),
                 page_size=DEFAULT_PAGE_SIZE,
                 max_pages=DISCOVERY_PAGES,
+                status_ui="divulgado",  # algo neutro para descobrir nomes
             )
             muni_choices = sorted({(it.get("municipio_nome") or "").strip()
                                    for it in sample_items if (it.get("municipio_nome") or "").strip()})
@@ -304,14 +333,36 @@ with st.sidebar:
             st.error(f"Falha também no fallback do PNCP ({e2}).")
             st.session_state.muni_choices = []
 
-    # Dropdown com busca e checkboxes
-    muni_selected = st.multiselect(
-        "Selecione municípios (opcional)",
-        options=st.session_state.muni_choices,
-        default=[m for m in st.session_state.muni_selected if m in st.session_state.muni_choices],
-        placeholder="Digite para buscar…",
-    )
-    st.session_state.muni_selected = muni_selected
+    # Seletor com busca + botão Adicionar (múltiplas inclusões)
+    cols_add = st.columns([3, 1])
+    with cols_add[0]:
+        add_muni = st.selectbox(
+            "Adicionar município",
+            options=["— selecione —"] + st.session_state.muni_choices,
+            index=0,
+            placeholder="Digite para buscar…",
+        )
+    with cols_add[1]:
+        if st.button("➕ Adicionar", use_container_width=True):
+            if add_muni and add_muni != "— selecione —":
+                if add_muni not in st.session_state.muni_selected:
+                    st.session_state.muni_selected.append(add_muni)
+                    st.session_state.last_added_muni = add_muni
+                else:
+                    st.info("Município já está na lista.")
+
+    # “Chips” com X para remover
+    if st.session_state.muni_selected:
+        st.caption("Municípios selecionados:")
+        chip_cols = st.columns(3)
+        for i, m in enumerate(st.session_state.muni_selected[:]):
+            col = chip_cols[i % 3]
+            with col:
+                if st.button(f"✖ {m}", key=f"del_{m}"):
+                    st.session_state.muni_selected.remove(m)
+                    st.experimental_rerun()
+    else:
+        st.caption("Nenhum município selecionado (opcional).")
 
     st.caption(f"{len(st.session_state.muni_choices)} município(s) disponíveis para {uf or '—'}.")
 
@@ -329,6 +380,7 @@ with st.sidebar:
                     "uf": uf,
                     "keyword": (keyword or "").strip(),
                     "municipios": st.session_state.muni_selected[:],
+                    "status": status_ui,
                 }
                 st.success(f"Pesquisa **{save_name.strip()}** salva.")
 
@@ -340,10 +392,10 @@ with st.sidebar:
         with col2:
             if st.button("Aplicar", use_container_width=True):
                 cfg = st.session_state.saved_searches[chosen]
-                # aplica parâmetros
                 st.session_state.muni_selected = cfg.get("municipios", [])
                 st.session_state._restore_uf = cfg.get("uf", "")
                 st.session_state._restore_keyword = cfg.get("keyword", "")
+                st.session_state._restore_status = cfg.get("status", "recebendo_proposta")
                 st.experimental_rerun()
         with col3:
             if st.button("Excluir", use_container_width=True):
@@ -376,17 +428,18 @@ with st.sidebar:
     st.divider()
     run = st.button("🚀 Executar busca", type="primary", use_container_width=True)
 
-# Restaura UF/keyword se vieram de “Aplicar”
-if "_restore_uf" in st.session_state or "_restore_keyword" in st.session_state:
+# Restaura parâmetros exibindo um aviso (evita loops de UI)
+if "_restore_uf" in st.session_state or "_restore_keyword" in st.session_state or "_restore_status" in st.session_state:
     with st.sidebar:
-        if "_restore_uf" in st.session_state and st.session_state["_restore_uf"]:
+        if st.session_state.get("_restore_uf"):
             st.info(f"UF aplicada: **{st.session_state['_restore_uf']}**")
-        if "_restore_keyword" in st.session_state and st.session_state["_restore_keyword"]:
+        if st.session_state.get("_restore_keyword"):
             st.info(f"Palavra-chave aplicada: **{st.session_state['_restore_keyword']}**")
-    # Nota: não forcei a mudança do selectbox “UF” aqui para evitar loop;
-    # use as infos apenas como referência visual.
-    del st.session_state["_restore_uf"]
-    del st.session_state["_restore_keyword"]
+        if st.session_state.get("_restore_status"):
+            st.info(f"Status aplicado: **{st.session_state['_restore_status']}**")
+    for k in ("_restore_uf","_restore_keyword","_restore_status"):
+        if k in st.session_state:
+            del st.session_state[k]
 
 # ==========================
 # Resultado principal (tabela)
@@ -399,7 +452,7 @@ details_placeholder = st.container()
 if run:
     st.toast("Iniciando busca no PNCP…", icon="🔎")
     progress = st.progress(0.0)
-    status = st.status("Consultando API do PNCP…", expanded=False)
+    status_box = st.status("Consultando API do PNCP…", expanded=False)
 
     try:
         t0 = time.time()
@@ -408,12 +461,24 @@ if run:
             keyword=(keyword or "").strip(),
             page_size=DEFAULT_PAGE_SIZE,
             max_pages=MAX_PAGES,
+            status_ui=status_ui,
             progress_cb=progress.progress,
         )
         rows = [normalize_item(it) for it in items]
         df = pd.DataFrame(rows)
 
-        # filtro por municípios, se selecionados
+        # Pós-filtro quando a API caiu no fallback sem 'status'
+        # (filtra por 'Situação' textual para aproximar os 4 estados desejados)
+        if not df.empty:
+            if status_ui == "divulgado":
+                df = df[df["Situação"].str.contains("divulg", case=False, na=False)]
+            elif status_ui == "em_andamento":
+                df = df[df["Situação"].str.contains("andament", case=False, na=False)]
+            elif status_ui == "concluido":
+                df = df[df["Situação"].str.contains("conclu", case=False, na=False)]
+            # 'recebendo_proposta' tende a vir da própria API; se vier sem, não filtramos aqui.
+
+        # filtro por municípios selecionados
         muni_selected = st.session_state.muni_selected or []
         if muni_selected:
             df = df[df["Cidade"].isin(set(muni_selected))].reset_index(drop=True)
@@ -470,12 +535,12 @@ if run:
                         else:
                             st.markdown(f"- {titulo}  \n  _{objeto}_")
 
-        status.update(label="Pronto!", state="complete", expanded=False)
+        status_box.update(label="Pronto!", state="complete", expanded=False)
         st.toast("Concluído!", icon="🎉")
 
     except requests.HTTPError as e:
-        status.update(label="Falha na busca. Tente novamente em instantes.", state="error", expanded=True)
+        status_box.update(label="Falha na busca. Tente novamente em instantes.", state="error", expanded=True)
         st.error(f"Falha na busca. Tente novamente em instantes.\n\n{e.__class__.__name__}: {e}", icon="🛑")
     except Exception as e:
-        status.update(label="Ocorreu um erro inesperado.", state="error", expanded=True)
+        status_box.update(label="Ocorreu um erro inesperado.", state="error", expanded=True)
         st.exception(e)
