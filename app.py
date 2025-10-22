@@ -1,202 +1,112 @@
 # app.py
 from __future__ import annotations
-
+import os
 import io
 import time
+import json
 import unicodedata
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import List, Dict, Tuple, Optional
 
-import pandas as pd
 import requests
+import pandas as pd
 import streamlit as st
 
-# =========================
-# Configuração do Streamlit
-# =========================
+# ==========================
+# Config / Constantes
+# ==========================
 st.set_page_config(
-    page_title="🧭 Acerte Licitações — O seu Buscador de Editais",
-    page_icon="🧭",
+    page_title="📑 Acerte Licitações — O seu Buscador de Editais",
+    page_icon="📑",
     layout="wide",
 )
-st.title("🧭 Acerte Licitações — O seu Buscador de Editais")
-st.caption(
-    "Pesquise editais no PNCP por municípios. "
-    "A UF é usada apenas para carregar a lista de cidades do IBGE."
-)
 
-# ===========
-# Constantes
-# ===========
 PNCP_API = "https://pncp.gov.br/api/search"
-IBGE_ESTADOS = "https://servicodados.ibge.gov.br/api/v1/localidades/estados?order=nome"
-IBGE_MUNS_BY_UF_ID = "https://servicodados.ibge.gov.br/api/v1/localidades/estados/{uf_id}/municipios?order=nome"
-
+HDRS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36",
+    "Accept-Language": "pt-BR,pt;q=0.9",
+    "Referer": "https://pncp.gov.br/app/editais",
+}
 TIMEOUT = 30
-UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
-HDRS = {"User-Agent": UA, "Referer": "https://pncp.gov.br/app/editais", "Accept-Language": "pt-BR,pt;q=0.9"}
+DEFAULT_PAGE_SIZE = 100     # PNCP máximo comum
+MAX_PAGES = 6               # limite de segurança por cidade
 
-UFS = ["", "AC","AL","AM","AP","BA","CE","DF","ES","GO","MA","MG","MS","MT","PA","PB","PE","PI","PR","RJ","RN","RO","RR","RS","SC","SE","SP","TO"]
+STATUS_OPTIONS = [
+    ("recebendo_proposta", "Recebendo proposta"),
+    ("divulgado", "Divulgado"),
+    ("em_andamento", "Em andamento"),
+    ("concluido", "Concluído"),
+]
 
-DEFAULT_PAGE_SIZE = 100
-MAX_PAGES = 60  # para não cortar resultados longos
-
-# =======================
-# Estado / utilitários
-# =======================
-if "saved_searches" not in st.session_state:
-    st.session_state.saved_searches: Dict[str, Dict] = {}
-
-if "muni_choices" not in st.session_state:
-    st.session_state.muni_choices: List[str] = []
-
-if "muni_selected" not in st.session_state:
-    st.session_state.muni_selected: List[str] = []
-
+# ==========================
+# Utilitários
+# ==========================
 def _norm(s: str) -> str:
     s = (s or "").strip().lower()
     s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
     return " ".join(s.split())
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def _ibge_map_uf_sigla_to_id() -> Dict[str, int]:
-    r = requests.get(IBGE_ESTADOS, timeout=TIMEOUT)
-    r.raise_for_status()
-    out = {}
-    for e in r.json():
-        sigla = (e.get("sigla") or "").strip().upper()
-        eid = e.get("id")
-        if sigla and isinstance(eid, int):
-            out[sigla] = eid
-    return out
+def _safe_get(d: dict, *keys, default=None):
+    for k in keys:
+        if isinstance(d, dict) and k in d:
+            d = d[k]
+        else:
+            return default
+    return d
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def _ibge_municipios_por_uf(uf_sigla: str) -> List[str]:
-    uf_sigla = (uf_sigla or "").strip().upper()
-    if not uf_sigla:
-        return []
-    mapa = _ibge_map_uf_sigla_to_id()
-    uf_id = mapa.get(uf_sigla)
-    if not uf_id:
-        return []
-    r = requests.get(IBGE_MUNS_BY_UF_ID.format(uf_id=uf_id), timeout=TIMEOUT)
-    r.raise_for_status()
-    munis = []
-    for m in r.json():
-        nome = (m.get("nome") or "").strip()
-        if nome:
-            munis.append(nome)
-    return sorted(set(munis))
-
-def _parse_dt(val: Optional[str]) -> Optional[pd.Timestamp]:
-    if not val:
-        return None
-    try:
-        return pd.to_datetime(val, utc=False, errors="coerce")
-    except Exception:
-        return None
-
-def _fmt_br(dt: Optional[pd.Timestamp]) -> str:
-    if isinstance(dt, pd.Timestamp) and not pd.isna(dt):
-        if dt.hour or dt.minute or dt.second:
-            return dt.strftime("%d/%m/%Y %H:%M")
-        return dt.strftime("%d/%m/%Y")
-    return ""
-
-def _extract_items_total(js: dict) -> Tuple[List[dict], int]:
-    if not isinstance(js, dict):
-        return [], 0
-
-    items = []
-    for items_key in ("items", "results", "licitacoes", "documentos", "conteudo", "data"):
-        if isinstance(js.get(items_key), list):
-            items = js[items_key]; break
-    else:
-        data = js.get("data") or {}
-        if isinstance(data, dict) and isinstance(data.get("items"), list):
-            items = data["items"]
-
-    total = 0
-    for total_key in ("total", "total_results", "totalItems", "count"):
-        if isinstance(js.get(total_key), int):
-            total = js[total_key]; break
-    if not total:
-        data = js.get("data") or {}
-        if isinstance(data, dict) and isinstance(data.get("total"), int):
-            total = data["total"]
-
-    if not total and items:
-        total = len(items)
-    return items or [], int(total or 0)
-
-def _build_link(item: dict) -> str:
-    # Garante caminho /app/editais/<cnpj>/<ano>/<seq>
-    url = (item.get("item_url") or "").strip()
-    if url:
-        parts = url.strip("/").split("/")
-        if len(parts) >= 4:
-            cnpj, ano, seq = parts[-3], parts[-2], parts[-1]
-            return f"https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}"
-    cnpj = str(item.get("orgao_cnpj") or "").strip()
-    ano = str(item.get("ano") or "").strip()
-    seq = str(item.get("numero_sequencial") or "").strip()
-    if len(cnpj) == 14 and len(ano) == 4 and seq:
+def _build_editais_link(orgao_cnpj: str, ano: str, numero_sequencial: str) -> str:
+    cnpj = "".join([c for c in str(orgao_cnpj or "") if c.isdigit()])
+    ano = str(ano or "").strip()
+    seq = str(numero_sequencial or "").strip()
+    if len(cnpj) == 14 and ano and seq:
         return f"https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}"
     return ""
 
-def normalize_item(item: dict) -> dict:
-    title = item.get("title") or item.get("titulo") or ""
-    description = item.get("description") or item.get("descricao") or ""
-    document_type = item.get("document_type") or item.get("tipo_documento") or ""
-    orgao_nome = item.get("orgao_nome") or item.get("orgao") or ""
-    unidade_nome = item.get("unidade_nome") or item.get("unidade") or ""
-    esfera_nome = item.get("esfera_nome") or item.get("esfera") or ""
-    modalidade = (
-        item.get("modalidade_licitacao_nome")
-        or item.get("modalidade")
-        or item.get("modalidade_nome")
-        or ""
+def _extract_items_total(js: dict) -> Tuple[List[dict], Optional[int]]:
+    """
+    O PNCP varia a forma de retorno. Tentamos campos usuais.
+    """
+    total = _safe_get(js, "total") or _safe_get(js, "count") or _safe_get(js, "meta", "total")
+    for k in ("items", "results", "conteudo", "licitacoes", "data", "documents", "documentos"):
+        v = js.get(k)
+        if isinstance(v, list):
+            return v, total
+    return [], total
+
+# ==========================
+# IBGE — UF e Municípios
+# ==========================
+@st.cache_data(ttl=86400, show_spinner=False)
+def ibge_ufs() -> List[Dict]:
+    r = requests.get("https://servicodados.ibge.gov.br/api/v1/localidades/estados?orderBy=nome", timeout=TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+    # devolve [{sigla:"SP", nome:"São Paulo"}, ...]
+    return [{"sigla": uf["sigla"], "nome": uf["nome"]} for uf in data]
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def ibge_municipios(uf_sigla: str) -> List[str]:
+    r = requests.get(
+        f"https://servicodados.ibge.gov.br/api/v1/localidades/estados/{uf_sigla}/municipios?orderBy=nome",
+        timeout=TIMEOUT,
     )
-    tipo_nome = item.get("tipo_nome") or item.get("tipo") or ""
-    municipio_nome = item.get("municipio_nome") or item.get("municipio") or ""
-    uf = item.get("uf") or ""
-    situacao_nome = item.get("situacao_nome") or ""
+    r.raise_for_status()
+    data = r.json()
+    return [m["nome"] for m in data]
 
-    dt_pub = _parse_dt(item.get("data_publicacao_pncp") or item.get("dataPublicacao"))
-    dt_fim = _parse_dt(item.get("data_fim_vigencia") or item.get("dataFimVigencia"))
-    link = _build_link(item)
-
-    return {
-        "Cidade": municipio_nome,
-        "UF": uf,
-        "Título": title,
-        "Objeto": description,
-        "Link para o edital": link,
-        "Tipo": document_type,
-        "Orgão": orgao_nome,
-        "Unidade": unidade_nome,
-        "Esfera": esfera_nome,
-        "Modalidade": modalidade,
-        "Publicação": _fmt_br(dt_pub),
-        "Fim do envio de proposta": _fmt_br(dt_fim),
-        "Tipo (nome)": tipo_nome,
-        "Situação": situacao_nome,
-    }
-
-# ------------------------------------------------------------------
-# Resolver código PNCP do município (a partir do nome + UF) – cache
-# ------------------------------------------------------------------
+# ==========================
+# Resolução do municipio_id no PNCP
+# ==========================
 @st.cache_data(ttl=86400, show_spinner=False)
 def resolve_pncp_municipio_id(uf: str, municipio_nome: str) -> Optional[str]:
     """
-    Busca no índice catalog2 e retorna o municipio_id mais frequente que
-    bate exatamente (ignorando acentos/caixa) com o nome do IBGE.
+    Tenta obter o municipio_id mais frequente que corresponde ao nome (normalizado)
+    dentro de 5 páginas recentes do índice 'catalog2'.
     """
     uf = (uf or "").strip().upper()
     alvo = _norm(municipio_nome)
     contagem: Dict[str, int] = {}
 
-    for pagina in range(1, 4):  # 3 páginas de amostra geralmente bastam
+    for pagina in range(1, 6):
         params = {
             "index": "catalog2",
             "doc_type": "_doc",
@@ -217,7 +127,11 @@ def resolve_pncp_municipio_id(uf: str, municipio_nome: str) -> Optional[str]:
             for it in items:
                 nome = _norm(it.get("municipio_nome") or "")
                 mid = str(it.get("municipio_id") or it.get("municipio") or "").strip()
-                if nome == alvo and mid:
+                if not mid:
+                    continue
+                if nome == alvo:
+                    contagem[mid] = contagem.get(mid, 0) + 2
+                elif nome.startswith(alvo) or alvo.startswith(nome):
                     contagem[mid] = contagem.get(mid, 0) + 1
         except Exception:
             break
@@ -226,21 +140,63 @@ def resolve_pncp_municipio_id(uf: str, municipio_nome: str) -> Optional[str]:
         return None
     return max(contagem.items(), key=lambda kv: kv[1])[0]
 
-# --------------------------------------------------------
-# Coleta por MUNICIPIO_ID (modo “aprovado”, apenas município)
-# --------------------------------------------------------
-def fetch_pages_by_municipio_id(muni_id: str, keyword: str, status_ui: str,
-                                page_size: int = DEFAULT_PAGE_SIZE, max_pages: int = MAX_PAGES) -> List[dict]:
+# ==========================
+# Busca principal por município (com fallback)
+# ==========================
+def fetch_pages_by_municipio_id(
+    muni_id: Optional[str],
+    uf: str,
+    municipio_nome: str,
+    keyword: str,
+    status_ui: str,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    max_pages: int = MAX_PAGES,
+) -> List[dict]:
+    """
+    Se muni_id existir: usa a rota 'municipios=<id>'.
+    Senão: fallback por UF + filtro do nome do município.
+    """
     all_items: List[dict] = []
+
+    # Caminho "aprovado": municipios=<id>
+    if muni_id:
+        page = 1
+        while page <= max_pages:
+            params = {
+                "tipos_documento": "edital",
+                "pagina": page,
+                "tam_pagina": page_size,
+                "ordenacao": "-data",
+                "municipios": muni_id,
+                "status": status_ui,
+            }
+            if keyword:
+                params["termo"] = keyword
+
+            r = requests.get(PNCP_API, params=params, headers=HDRS, timeout=TIMEOUT)
+            if r.status_code >= 400:
+                break
+            items, total = _extract_items_total(r.json())
+            if not items:
+                break
+            all_items.extend(items)
+            if total and len(all_items) >= total:
+                break
+            page += 1
+        return all_items
+
+    # Fallback: UF + filtro de nome do município (cliente)
     page = 1
+    alvo = _norm(municipio_nome)
     while page <= max_pages:
         params = {
-            "tipos_documento": "edital",
+            "index": "catalog2",
+            "doc_type": "_doc",
+            "document_type": "edital",
             "pagina": page,
             "tam_pagina": page_size,
-            "ordenacao": "-data",
-            "municipios": muni_id,
-            "status": status_ui,
+            "ordenacao": "-data_publicacao_pncp",
+            "uf": uf,
         }
         if keyword:
             params["termo"] = keyword
@@ -251,233 +207,203 @@ def fetch_pages_by_municipio_id(muni_id: str, keyword: str, status_ui: str,
         items, total = _extract_items_total(r.json())
         if not items:
             break
-        all_items.extend(items)
-        if total and len(all_items) >= total:
+
+        for it in items:
+            nome = _norm(it.get("municipio_nome") or "")
+            if nome == alvo or nome.startswith(alvo) or alvo.startswith(nome):
+                all_items.append(it)
+
+        if total and page * page_size >= total:
             break
         page += 1
+
     return all_items
 
-# ==================
-# Barra lateral (UI)
-# ==================
-with st.sidebar:
-    st.subheader("Parâmetros da busca")
+# ==========================
+# Enriquecimento (description etc. pelo catalog2)
+# ==========================
+def enrich_from_catalog2(orgao_cnpj: str, ano: str, numero_sequencial: str, uf: str) -> dict:
+    """
+    Busca 1 item no catalog2 que bata com CNPJ/Ano/Seq para pegar description e campos ricos.
+    Estratégia: pesquisa por 'termo' combinando cnpj/ano/seq e confere match exato.
+    """
+    termo = f"{orgao_cnpj} {ano} {numero_sequencial}"
+    params = {
+        "index": "catalog2",
+        "doc_type": "_doc",
+        "document_type": "edital",
+        "pagina": 1,
+        "tam_pagina": 10,
+        "ordenacao": "-data_publicacao_pncp",
+        "uf": uf,
+        "termo": termo,
+    }
+    try:
+        r = requests.get(PNCP_API, params=params, headers=HDRS, timeout=TIMEOUT)
+        if r.status_code >= 400:
+            return {}
+        items, _ = _extract_items_total(r.json())
+        if not items:
+            return {}
+        cnpj_d = "".join([c for c in str(orgao_cnpj or "") if c.isdigit()])
+        seq_d = str(numero_sequencial or "").strip()
+        ano_d = str(ano or "").strip()
 
-    uf = st.selectbox("UF (para listar municípios)", UFS, index=UFS.index("SP"))
+        # escolhe o primeiro que casa cnpj/ano/seq
+        for it in items:
+            if (
+                "".join([c for c in str(it.get("orgao_cnpj") or "") if c.isdigit()]) == cnpj_d
+                and str(it.get("ano") or "").strip() == ano_d
+                and str(it.get("numero_sequencial") or "").strip() == seq_d
+            ):
+                return it
+        # se não achou match perfeito, devolve o primeiro
+        return items[0]
+    except Exception:
+        return {}
+
+# ==========================
+# Normalização final -> DataFrame
+# ==========================
+def normalize_items(items: List[dict], uf: str) -> pd.DataFrame:
+    rows = []
+    for it in items:
+        title = it.get("title") or it.get("titulo") or ""
+        orgao_cnpj = it.get("orgao_cnpj") or ""
+        ano = it.get("ano") or ""
+        seq = it.get("numero_sequencial") or ""
+
+        # enriquecer (para 'description' e outros)
+        rich = enrich_from_catalog2(orgao_cnpj, ano, seq, uf)
+
+        row = {
+            "Cidade": it.get("municipio_nome") or rich.get("municipio_nome") or "",
+            "UF": it.get("uf") or rich.get("uf") or uf,
+            "Título": title,
+            "Objeto": rich.get("description") or it.get("description") or "",
+            "Link para o edital": _build_editais_link(orgao_cnpj, ano, seq),
+            "Tipo": it.get("document_type") or rich.get("document_type") or "edital",
+            "Orgão": it.get("orgao_nome") or rich.get("orgao_nome") or "",
+            "Unidade": it.get("unidade_nome") or rich.get("unidade_nome") or "",
+            "Esfera": it.get("esfera_nome") or rich.get("esfera_nome") or "",
+            "Modalidade": it.get("modalidade_licitacao_nome") or rich.get("modalidade_licitacao_nome") or "",
+            "Publicação": it.get("data_publicacao_pncp") or rich.get("data_publicacao_pncp") or "",
+            "Fim do envio de proposta": it.get("data_fim_vigencia") or rich.get("data_fim_vigencia") or "",
+            "Tipo (PNCP)": it.get("tipo_nome") or rich.get("tipo_nome") or "",
+        }
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    # ordenar por Publicação desc se possível
+    if not df.empty and "Publicação" in df.columns:
+        df["__pub__"] = pd.to_datetime(df["Publicação"], errors="coerce")
+        df = df.sort_values("__pub__", ascending=False, na_position="last").drop(columns="__pub__", errors="ignore")
+    return df
+
+# ==========================
+# UI
+# ==========================
+st.markdown("### 📑 Acerte Licitações — O seu Buscador de Editais")
+st.caption("Busca oficial no PNCP com enriquecimento automático do objeto (description).")
+
+with st.sidebar:
+    st.subheader("Parâmetros")
+    # UF
+    ufs = ibge_ufs()
+    uf_labels = [f"{u['nome']} ({u['sigla']})" for u in ufs]
+    uf_siglas = [u["sigla"] for u in ufs]
+    uf_idx = uf_siglas.index("SP") if "SP" in uf_siglas else 0
+    uf_choice = st.selectbox("UF", options=list(range(len(ufs))), index=uf_idx, format_func=lambda i: uf_labels[i])
+    uf = ufs[uf_choice]["sigla"]
+
+    # Lista de municípios da UF (com busca e múltipla seleção)
+    all_cities = ibge_municipios(uf)
+    st.write("Municípios (selecione um ou mais):")
+    selected_cities = st.multiselect(
+        "Selecione municípios",
+        options=all_cities,
+        default=[],
+        placeholder="Digite para filtrar…",
+        label_visibility="collapsed",
+    )
+
+    # Palavra-chave
     keyword = st.text_input("Palavra-chave (opcional)", value="")
 
-    st.markdown("#### Status do edital")
-    status_values = ["recebendo_proposta", "divulgado", "em_andamento", "concluido"]
-    status_ui = st.selectbox("Filtrar por status", status_values, index=0)
+    # Status
+    status_map = {label: key for key, label in STATUS_OPTIONS}
+    status_label = st.selectbox("Status no PNCP", options=[l for _, l in STATUS_OPTIONS], index=0)
+    status_ui = status_map[status_label]
 
-    st.divider()
-    st.markdown("#### Municípios (IBGE)")
+    run_btn = st.button("🔎 Executar busca", use_container_width=True, type="primary")
 
-    # Recarrega lista de municípios quando a UF muda
-    try:
-        muni_choices = _ibge_municipios_por_uf(uf) if uf else []
-        st.session_state.muni_choices = muni_choices
-    except Exception as e:
-        st.error(f"IBGE indisponível ({e}).")
-        st.session_state.muni_choices = []
+# espaço de resultados (tabela em cima, como combinado)
+tbl_placeholder = st.empty()
+st.divider()
 
-    # Adicionar município (busca + botão)
-    with st.container(border=True):
-        cols_add = st.columns([3, 1])
-        with cols_add[0]:
-            add_muni = st.selectbox(
-                "Adicionar município",
-                options=["— selecione —"] + st.session_state.muni_choices,
-                index=0,
-                placeholder="Digite para buscar…",
-            )
-        with cols_add[1]:
-            if st.button("➕ Adicionar", use_container_width=True):
-                if add_muni and add_muni != "— selecione —":
-                    if add_muni not in st.session_state.muni_selected:
-                        st.session_state.muni_selected.append(add_muni)
-                    else:
-                        st.info("Município já está na lista.")
+# Feedback de andamento por cidade (barra estilo “aprovado”)
+progress_text = st.empty()
+progress_bar = st.progress(0, text="Aguardando…")
 
-    # Chips removíveis
-    if st.session_state.muni_selected:
-        st.caption("Municípios selecionados:")
-        chip_cols = st.columns(3)
-        for i, m in enumerate(st.session_state.muni_selected[:]):
-            col = chip_cols[i % 3]
-            with col:
-                if st.button(f"✖ {m}", key=f"del_{m}"):
-                    st.session_state.muni_selected.remove(m)
-                    st.experimental_rerun()
+# Execução
+if run_btn:
+    if not selected_cities:
+        st.warning("Selecione ao menos um município.", icon="⚠️")
     else:
-        st.caption("Nenhum município selecionado (obrigatório para pesquisar).")
+        all_collected: List[dict] = []
+        total_cities = len(selected_cities)
+        started = time.time()
 
-    st.divider()
-    st.markdown("#### Pesquisas salvas")
-    with st.container(border=True):
-        col_a, col_b = st.columns([3, 1])
-        with col_a:
-            save_name = st.text_input("Nome da pesquisa", placeholder="Ex.: SP – saúde")
-        with col_b:
-            save_clicked = st.button("💾 Salvar", use_container_width=True, type="primary")
-        if save_clicked:
-            if not save_name.strip():
-                st.warning("Informe um nome para a pesquisa.")
-            else:
-                st.session_state.saved_searches[save_name.strip()] = {
-                    "uf": uf,
-                    "keyword": (keyword or "").strip(),
-                    "municipios": st.session_state.muni_selected[:],
-                    "status": status_ui,
-                }
-                st.success(f"Pesquisa **{save_name.strip()}** salva.")
-    if st.session_state.saved_searches:
-        with st.container(border=True):
-            names = sorted(st.session_state.saved_searches.keys())
-            col1, col2, col3 = st.columns([2.6, 0.7, 0.7])
-            with col1:
-                chosen = st.selectbox("Minhas pesquisas", names)
-            with col2:
-                if st.button("Aplicar", use_container_width=True):
-                    cfg = st.session_state.saved_searches[chosen]
-                    st.session_state.muni_selected = cfg.get("municipios", [])
-                    st.session_state["_restore"] = cfg
-                    st.experimental_rerun()
-            with col3:
-                if st.button("Excluir", use_container_width=True):
-                    st.session_state.saved_searches.pop(chosen, None)
-                    st.experimental_rerun()
+        for idx, city in enumerate(selected_cities, start=1):
+            # Atualiza barra com o nome do município atual (em vez de % puro)
+            progress_bar.progress(int(idx / total_cities * 100),
+                                  text=f"Buscando: {city} ({idx}/{total_cities}) — status {status_label.lower()}")
 
-    st.divider()
-    run = st.button("🚀 Executar busca", type="primary", use_container_width=True)
+            # tenta resolver o ID PNCP do município
+            muni_id = resolve_pncp_municipio_id(uf, city)
 
-# Restaura parâmetros (se aplicou pesquisa salva)
-if st.session_state.get("_restore"):
-    cfg = st.session_state.pop("_restore")
-    with st.sidebar:
-        st.info(f"UF aplicada: **{cfg.get('uf','')}**")
-        if cfg.get("keyword"):
-            st.info(f"Palavra-chave aplicada: **{cfg.get('keyword','')}**")
-        st.info(f"Status aplicado: **{cfg.get('status','recebendo_proposta')}**")
+            # coleta itens (caminho principal por ID, senão fallback por UF+city)
+            items_m = fetch_pages_by_municipio_id(
+                muni_id=muni_id,
+                uf=uf,
+                municipio_nome=city,
+                keyword=keyword,
+                status_ui=status_ui,
+                page_size=DEFAULT_PAGE_SIZE,
+                max_pages=MAX_PAGES,
+            )
+            all_collected.extend(items_m)
 
-# ==========================
-# Resultado principal (tabela)
-# ==========================
-table_area = st.empty()
-download_area = st.empty()
-details_area = st.container()
+        # Finaliza barra
+        progress_bar.progress(100, text=f"Concluído — {total_cities} município(s) em {time.time()-started:.1f}s")
 
-def progress_municipio_ui():
-    """Indicador que mostra QUAL município está sendo pesquisado (sem porcentagem)."""
-    box = st.container()
-    with box:
-        st.markdown("##### Carregando resultados do PNCP…")
-        current = st.empty()
-    def set_city(name: str, idx: int, total: int):
-        current.markdown(f"**Pesquisando {idx}/{total}: {name}**")
-    def close():
-        box.empty()
-    return set_city, close
+        # Normaliza e mostra tabela
+        df = normalize_items(all_collected, uf=uf)
 
-if run:
-    try:
-        muni_selected = st.session_state.muni_selected or []
-        if not muni_selected:
-            st.warning("Selecione ao menos um município para pesquisar.", icon="⚠️")
+        if df.empty:
+            tbl_placeholder.warning("Nenhum resultado retornado. Tente outro status, palavra-chave ou municípios.", icon="ℹ️")
         else:
-            set_city, close_city = progress_municipio_ui()
-            t0 = time.time()
-
-            # 1) Resolver cod PNCP
-            resolved: Dict[str, str] = {}
-            for m in muni_selected:
-                set_city(m, len(resolved)+1, len(muni_selected))
-                mid = resolve_pncp_municipio_id(uf, m)
-                if mid:
-                    resolved[m] = mid
-
-            if not resolved:
-                close_city()
-                st.error("Não foi possível resolver códigos PNCP para os municípios selecionados.", icon="🛑")
+            # Corrige links como hyperlink clicável
+            if "Link para o edital" in df.columns:
+                df_disp = df.copy()
+                df_disp["Link para o edital"] = df_disp["Link para o edital"].apply(
+                    lambda u: f"[abrir edital]({u})" if u else ""
+                )
             else:
-                # 2) Buscar por município (API clássica com municipios=<id>)
-                all_items: List[dict] = []
-                total_cities = len(resolved)
-                for idx, (m, mid) in enumerate(resolved.items(), start=1):
-                    set_city(m, idx, total_cities)
-                    items_m = fetch_pages_by_municipio_id(
-                        muni_id=mid,
-                        keyword=st.session_state.get("keyword", "") or "",
-                        status_ui=st.session_state.get("status", "") or status_ui,
-                        page_size=DEFAULT_PAGE_SIZE,
-                        max_pages=MAX_PAGES,
-                    )
-                    all_items.extend(items_m)
+                df_disp = df
 
-                close_city()
+            tbl_placeholder.dataframe(df_disp, use_container_width=True)
 
-                # 3) Normalizar, deduplicar e exibir
-                rows = [normalize_item(it) for it in all_items]
-                df = pd.DataFrame(rows)
+            # Download XLSX (apenas XLSX, sem CSV)
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+                df.to_excel(xw, index=False, sheet_name="PNCP")
 
-                # Filtrar pós (só por garantia)
-                if muni_selected and not df.empty:
-                    df = df[df["Cidade"].isin(set(muni_selected))].reset_index(drop=True)
-
-                # Deduplicar por link
-                if "Link para o edital" in df.columns and not df.empty:
-                    df = df.drop_duplicates(subset=["Link para o edital"]).reset_index(drop=True)
-
-                display_cols = [
-                    "Cidade", "UF", "Título", "Objeto", "Link para o edital",
-                    "Tipo", "Orgão", "Unidade", "Esfera", "Modalidade",
-                    "Publicação", "Fim do envio de proposta", "Tipo (nome)", "Situação",
-                ]
-                for c in display_cols:
-                    if c not in df.columns:
-                        df[c] = ""
-                df = df[display_cols]
-
-                with table_area:
-                    st.subheader("Resultados")
-                    st.dataframe(df, use_container_width=True, hide_index=True)
-
-                # Download XLSX (em destaque)
-                if not df.empty:
-                    buf = io.BytesIO()
-                    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
-                        df.to_excel(xw, index=False, sheet_name="PNCP")
-                    buf.seek(0)
-                    with download_area:
-                        st.download_button(
-                            "⬇️ Baixar XLSX",
-                            data=buf,
-                            file_name=f"pncp_resultados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True,
-                            type="primary",
-                        )
-
-                # Lista por cidade
-                with details_area:
-                    if not df.empty:
-                        st.markdown("### Editais por cidade (lista)")
-                        grp = df.groupby(["Cidade", "UF"], dropna=False)
-                        for (cidade, ufv), g in grp:
-                            st.markdown(f"**{cidade or '-'} / {ufv or '-'}** — {len(g)} edital(is)")
-                            for _, row in g.iterrows():
-                                titulo = (row.get("Título") or "").strip() or "(sem título)"
-                                link = (row.get("Link para o edital") or "").strip()
-                                objeto = (row.get("Objeto") or "").strip()
-                                if link:
-                                    st.markdown(f"- [{titulo}]({link})  \n  _{objeto}_")
-                                else:
-                                    st.markdown(f"- {titulo}  \n  _{objeto}_")
-
-                elapsed = time.time() - t0
-                st.success(f"Busca concluída: {len(df)} registro(s) em {elapsed:.1f}s.", icon="✅")
-
-    except requests.HTTPError as e:
-        st.error(f"Falha na busca. Tente novamente em instantes.\n\n{e.__class__.__name__}: {e}", icon="🛑")
-    except Exception as e:
-        st.exception(e)
+            st.download_button(
+                "⬇️ Baixar XLSX",
+                data=buf.getvalue(),
+                file_name="pncp_resultados.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                type="primary",
+            )
