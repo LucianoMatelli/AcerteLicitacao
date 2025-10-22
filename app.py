@@ -47,7 +47,6 @@ UFS = [
 ]
 
 DEFAULT_PAGE_SIZE = 100
-DISCOVERY_PAGES = 5
 MAX_PAGES = 30
 
 # =======================
@@ -344,7 +343,7 @@ with st.sidebar:
     st.divider()
     st.markdown("#### Pesquisas salvas")
 
-    # Caixa de "Salvar pesquisa" com layout melhor
+    # Caixa de "Salvar pesquisa" com layout melhor (sem exportar/importar)
     with st.container(border=True):
         col_a, col_b = st.columns([3, 1])
         with col_a:
@@ -363,7 +362,7 @@ with st.sidebar:
                 }
                 st.success(f"Pesquisa **{save_name.strip()}** salva.")
 
-    # Lista + aplicar/excluir, exportar/importar
+    # Lista + aplicar/excluir (REMOVIDO exportar/importar)
     if st.session_state.saved_searches:
         with st.container(border=True):
             names = sorted(st.session_state.saved_searches.keys())
@@ -374,7 +373,6 @@ with st.sidebar:
                 if st.button("Aplicar", use_container_width=True):
                     cfg = st.session_state.saved_searches[chosen]
                     st.session_state.muni_selected = cfg.get("municipios", [])
-                    # aplica uf/keyword/status direto e força recarregar a interface
                     st.session_state["_restore"] = cfg
                     st.experimental_rerun()
             with col3:
@@ -382,36 +380,12 @@ with st.sidebar:
                     st.session_state.saved_searches.pop(chosen, None)
                     st.experimental_rerun()
 
-            colx, coly = st.columns(2)
-            with colx:
-                st.download_button(
-                    "⬇️ Exportar pesquisas (JSON)",
-                    data=json.dumps(st.session_state.saved_searches, ensure_ascii=False, indent=2),
-                    file_name="pesquisas_salvas.json",
-                    mime="application/json",
-                    use_container_width=True,
-                )
-            with coly:
-                up = st.file_uploader("Importar JSON", type=["json"])
-                if up is not None:
-                    try:
-                        data = json.load(up)
-                        if isinstance(data, dict):
-                            st.session_state.saved_searches.update(data)
-                            st.success("Pesquisas importadas.")
-                            st.experimental_rerun()
-                        else:
-                            st.error("Arquivo inválido.")
-                    except Exception as e:
-                        st.error(f"Falha ao importar: {e}")
-
     st.divider()
     run = st.button("🚀 Executar busca", type="primary", use_container_width=True)
 
 # Restaura parâmetros (se aplicou uma pesquisa salva)
 if st.session_state.get("_restore"):
     cfg = st.session_state.pop("_restore")
-    # Para refletir UF/keyword/status na UI, mostramos avisos sutis
     with st.sidebar:
         st.info(f"UF aplicada: **{cfg.get('uf','')}**")
         if cfg.get("keyword"):
@@ -426,10 +400,7 @@ download_area = st.empty()
 details_area = st.container()
 
 def _progress_ui():
-    """
-    Barra de carregamento 'aprovada': barra + label percentual.
-    Some ao concluir e só então exibimos a tabela.
-    """
+    """Barra de carregamento 'aprovada'."""
     box = st.container()
     with box:
         st.markdown("##### Carregando resultados do PNCP…")
@@ -445,7 +416,6 @@ def _progress_ui():
 
 if run:
     try:
-        # barra aprovada
         progress_update, progress_close = _progress_ui()
 
         t0 = time.time()
@@ -460,7 +430,7 @@ if run:
         rows = [normalize_item(it) for it in items]
         df = pd.DataFrame(rows)
 
-        # Se caiu no fallback sem 'status', pós-filtramos por "Situação"
+        # Pós-filtro por "Situação" quando caímos no fallback sem status
         if not df.empty:
             if status_ui == "divulgado":
                 df = df[df["Situação"].str.contains("divulg", case=False, na=False)]
@@ -485,10 +455,9 @@ if run:
                 df[c] = ""
         df = df[display_cols]
 
-        # fecha a barra e só então mostra a tabela (comportamento aprovado)
+        # Fecha a barra e mostra a tabela
         progress_close()
 
-        # Tabela
         with table_area:
             st.subheader("Resultados")
             st.dataframe(df, use_container_width=True, hide_index=True)
