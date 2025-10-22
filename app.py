@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import io
-import json
 import time
+import unicodedata
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -34,20 +34,12 @@ IBGE_MUNS_BY_UF_ID = "https://servicodados.ibge.gov.br/api/v1/localidades/estado
 
 TIMEOUT = 30
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
-HDRS = {
-    "User-Agent": UA,
-    "Referer": "https://pncp.gov.br/app/editais",
-    "Accept-Language": "pt-BR,pt;q=0.9",
-}
+HDRS = {"User-Agent": UA, "Referer": "https://pncp.gov.br/app/editais", "Accept-Language": "pt-BR,pt;q=0.9"}
 
-UFS = [
-    "", "AC", "AL", "AM", "AP", "BA", "CE", "DF", "ES", "GO",
-    "MA", "MG", "MS", "MT", "PA", "PB", "PE", "PI", "PR",
-    "RJ", "RN", "RO", "RR", "RS", "SC", "SE", "SP", "TO",
-]
+UFS = ["", "AC","AL","AM","AP","BA","CE","DF","ES","GO","MA","MG","MS","MT","PA","PB","PE","PI","PR","RJ","RN","RO","RR","RS","SC","SE","SP","TO"]
 
 DEFAULT_PAGE_SIZE = 100
-MAX_PAGES = 30
+MAX_PAGES = 60  # aumentamos para não cortar resultados
 
 # =======================
 # Estado / utilitários
@@ -60,6 +52,11 @@ if "muni_choices" not in st.session_state:
 
 if "muni_selected" not in st.session_state:
     st.session_state.muni_selected: List[str] = []
+
+def _norm(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    return " ".join(s.split())
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def _ibge_map_uf_sigla_to_id() -> Dict[str, int]:
@@ -113,8 +110,7 @@ def _extract_items_total(js: dict) -> Tuple[List[dict], int]:
     items = []
     for items_key in ("items", "results", "licitacoes", "documentos", "conteudo", "data"):
         if isinstance(js.get(items_key), list):
-            items = js[items_key]
-            break
+            items = js[items_key]; break
     else:
         data = js.get("data") or {}
         if isinstance(data, dict) and isinstance(data.get("items"), list):
@@ -123,8 +119,7 @@ def _extract_items_total(js: dict) -> Tuple[List[dict], int]:
     total = 0
     for total_key in ("total", "total_results", "totalItems", "count"):
         if isinstance(js.get(total_key), int):
-            total = js[total_key]
-            break
+            total = js[total_key]; break
     if not total:
         data = js.get("data") or {}
         if isinstance(data, dict) and isinstance(data.get("total"), int):
@@ -133,101 +128,6 @@ def _extract_items_total(js: dict) -> Tuple[List[dict], int]:
     if not total and items:
         total = len(items)
     return items or [], int(total or 0)
-
-def fetch_page(
-    uf: Optional[str],
-    page: int,
-    page_size: int = DEFAULT_PAGE_SIZE,
-    keyword: str = "",
-    status_ui: str = "recebendo_proposta",  # recebendo_proposta | divulgado | em_andamento | concluido
-) -> Tuple[List[Dict], int]:
-    # 1) API “clássica”
-    params1 = {
-        "tipos_documento": "edital",
-        "pagina": page,
-        "tam_pagina": page_size,
-        "ordenacao": "-data",
-        "status": status_ui,
-    }
-    if uf:
-        params1["uf"] = uf
-    if keyword:
-        params1["termo"] = keyword
-
-    r = requests.get(PNCP_API, params=params1, headers=HDRS, timeout=TIMEOUT)
-    if r.status_code < 400:
-        return _extract_items_total(r.json())
-    if r.status_code not in (400, 422):
-        r.raise_for_status()
-
-    # 2) Fallback “catalog2”
-    params2 = {
-        "index": "catalog2",
-        "doc_type": "_doc",
-        "document_type": "edital",
-        "pagina": page,
-        "tam_pagina": page_size,
-        "ordenacao": "-data_publicacao_pncp",
-        "status": status_ui,
-    }
-    if uf:
-        params2["uf"] = uf
-    if keyword:
-        params2["termo"] = keyword
-
-    r2 = requests.get(PNCP_API, params=params2, headers=HDRS, timeout=TIMEOUT)
-    if r2.status_code < 400:
-        return _extract_items_total(r2.json())
-
-    # 3) Fallback “sem status”
-    params3 = {
-        "index": "catalog2",
-        "doc_type": "_doc",
-        "document_type": "edital",
-        "pagina": page,
-        "tam_pagina": page_size,
-        "ordenacao": "-data_publicacao_pncp",
-    }
-    if uf:
-        params3["uf"] = uf
-    if keyword:
-        params3["termo"] = keyword
-
-    r3 = requests.get(PNCP_API, params=params3, headers=HDRS, timeout=TIMEOUT)
-    r3.raise_for_status()
-    return _extract_items_total(r3.json())
-
-def collect_results(
-    uf: Optional[str],
-    keyword: str = "",
-    page_size: int = DEFAULT_PAGE_SIZE,
-    max_pages: int = MAX_PAGES,
-    status_ui: str = "recebendo_proposta",
-    progress_cb=None,
-) -> List[Dict]:
-    all_items: List[Dict] = []
-    page = 1
-    total_known = None
-
-    while page <= max_pages:
-        items, total = fetch_page(uf=uf, page=page, page_size=page_size, keyword=keyword, status_ui=status_ui)
-        if total_known is None:
-            total_known = total
-
-        if not items:
-            break
-
-        all_items.extend(items)
-        if progress_cb and total:
-            progress_cb(min(len(all_items) / total, 0.99))
-
-        if total and len(all_items) >= total:
-            break
-        page += 1
-
-    if progress_cb:
-        progress_cb(1.0)
-    return all_items
 
 def _build_link(item: dict) -> str:
     url = (item.get("item_url") or "").strip()
@@ -263,7 +163,6 @@ def normalize_item(item: dict) -> dict:
 
     dt_pub = _parse_dt(item.get("data_publicacao_pncp") or item.get("dataPublicacao"))
     dt_fim = _parse_dt(item.get("data_fim_vigencia") or item.get("dataFimVigencia"))
-
     link = _build_link(item)
 
     return {
@@ -280,8 +179,141 @@ def normalize_item(item: dict) -> dict:
         "Publicação": _fmt_br(dt_pub),
         "Fim do envio de proposta": _fmt_br(dt_fim),
         "Tipo (nome)": tipo_nome,
-        "Situação": situacao_nome,  # para pós-filtro quando necessário
+        "Situação": situacao_nome,
     }
+
+# ------------------------------------------------------------------
+# Resolver código PNCP do município (a partir do nome + UF) – cache
+# ------------------------------------------------------------------
+@st.cache_data(ttl=86400, show_spinner=False)
+def resolve_pncp_municipio_id(uf: str, municipio_nome: str) -> Optional[str]:
+    """
+    Faz algumas buscas no índice catalog2 e retorna o municipio_id mais
+    frequente que *bate exatamente* (ignorando acentos e caixa) com o nome do IBGE.
+    """
+    uf = (uf or "").strip().upper()
+    alvo = _norm(municipio_nome)
+
+    contagem: Dict[str, int] = {}
+    for pagina in range(1, 4):  # 3 páginas de amostra bastam p/ achar o id
+        params = {
+            "index": "catalog2",
+            "doc_type": "_doc",
+            "document_type": "edital",
+            "pagina": pagina,
+            "tam_pagina": 100,
+            "ordenacao": "-data_publicacao_pncp",
+            "uf": uf,
+            "termo": municipio_nome,  # ajuda a trazer itens do município correto
+        }
+        try:
+            r = requests.get(PNCP_API, params=params, headers=HDRS, timeout=TIMEOUT)
+            if r.status_code >= 400:
+                break
+            items, _ = _extract_items_total(r.json())
+            if not items:
+                break
+            for it in items:
+                nome = _norm(it.get("municipio_nome") or "")
+                mid = str(it.get("municipio_id") or it.get("municipio") or "").strip()
+                if nome == alvo and mid:
+                    contagem[mid] = contagem.get(mid, 0) + 1
+        except Exception:
+            break
+
+    if not contagem:
+        return None
+    # retorna o id mais frequente
+    return max(contagem.items(), key=lambda kv: kv[1])[0]
+
+# --------------------------------------------------------
+# Coleta por UF (fallback) e por MUNICIPIO_ID (preferível)
+# --------------------------------------------------------
+def fetch_pages_by_uf(uf: str, keyword: str, status_ui: str,
+                      page_size: int = DEFAULT_PAGE_SIZE, max_pages: int = MAX_PAGES,
+                      progress_cb=None) -> List[dict]:
+    all_items: List[dict] = []
+    page = 1
+    total_known = None
+    while page <= max_pages:
+        # tentativa 1: API clássica por UF
+        params1 = {
+            "tipos_documento": "edital",
+            "pagina": page,
+            "tam_pagina": page_size,
+            "ordenacao": "-data",
+            "status": status_ui,
+            "uf": uf,
+        }
+        if keyword:
+            params1["termo"] = keyword
+
+        r = requests.get(PNCP_API, params=params1, headers=HDRS, timeout=TIMEOUT)
+        if r.status_code < 400:
+            items, total = _extract_items_total(r.json())
+        else:
+            # fallback catalog2
+            params2 = {
+                "index": "catalog2",
+                "doc_type": "_doc",
+                "document_type": "edital",
+                "pagina": page,
+                "tam_pagina": page_size,
+                "ordenacao": "-data_publicacao_pncp",
+                "uf": uf,
+            }
+            if keyword:
+                params2["termo"] = keyword
+            r2 = requests.get(PNCP_API, params=params2, headers=HDRS, timeout=TIMEOUT)
+            r2.raise_for_status()
+            items, total = _extract_items_total(r2.json())
+
+        if total_known is None:
+            total_known = total
+        if not items:
+            break
+
+        all_items.extend(items)
+        if progress_cb and total:
+            progress_cb(min(len(all_items) / total, 0.99))
+        if total and len(all_items) >= total:
+            break
+        page += 1
+
+    if progress_cb:
+        progress_cb(1.0)
+    return all_items
+
+def fetch_pages_by_municipio_id(muni_id: str, keyword: str, status_ui: str,
+                                page_size: int = DEFAULT_PAGE_SIZE, max_pages: int = MAX_PAGES) -> List[dict]:
+    """
+    Modo que replica a versão 'aprovada': usa 'municipios=<id>' na API clássica.
+    """
+    all_items: List[dict] = []
+    page = 1
+    while page <= max_pages:
+        params = {
+            "tipos_documento": "edital",
+            "pagina": page,
+            "tam_pagina": page_size,
+            "ordenacao": "-data",
+            "municipios": muni_id,
+            "status": status_ui,
+        }
+        if keyword:
+            params["termo"] = keyword
+
+        r = requests.get(PNCP_API, params=params, headers=HDRS, timeout=TIMEOUT)
+        if r.status_code >= 400:
+            break  # se a clássica falhar para município, paramos (costuma ser suficiente)
+        items, total = _extract_items_total(r.json())
+        if not items:
+            break
+        all_items.extend(items)
+        if total and len(all_items) >= total:
+            break
+        page += 1
+    return all_items
 
 # ==================
 # Barra lateral (UI)
@@ -291,7 +323,6 @@ with st.sidebar:
     uf = st.selectbox("UF", UFS, index=UFS.index("SP"))
     keyword = st.text_input("Palavra-chave (opcional)", value="")
 
-    # Status do edital – os 4 valores pedidos
     st.markdown("#### Status do edital")
     status_values = ["recebendo_proposta", "divulgado", "em_andamento", "concluido"]
     status_ui = st.selectbox("Filtrar por status", status_values, index=0)
@@ -325,7 +356,7 @@ with st.sidebar:
                     else:
                         st.info("Município já está na lista.")
 
-    # “Chips” removíveis
+    # Chips removíveis
     if st.session_state.muni_selected:
         st.caption("Municípios selecionados:")
         chip_cols = st.columns(3)
@@ -342,8 +373,6 @@ with st.sidebar:
 
     st.divider()
     st.markdown("#### Pesquisas salvas")
-
-    # Caixa de "Salvar pesquisa" com layout melhor (sem exportar/importar)
     with st.container(border=True):
         col_a, col_b = st.columns([3, 1])
         with col_a:
@@ -361,8 +390,6 @@ with st.sidebar:
                     "status": status_ui,
                 }
                 st.success(f"Pesquisa **{save_name.strip()}** salva.")
-
-    # Lista + aplicar/excluir (REMOVIDO exportar/importar)
     if st.session_state.saved_searches:
         with st.container(border=True):
             names = sorted(st.session_state.saved_searches.keys())
@@ -383,7 +410,7 @@ with st.sidebar:
     st.divider()
     run = st.button("🚀 Executar busca", type="primary", use_container_width=True)
 
-# Restaura parâmetros (se aplicou uma pesquisa salva)
+# Restaura parâmetros (se aplicou pesquisa salva)
 if st.session_state.get("_restore"):
     cfg = st.session_state.pop("_restore")
     with st.sidebar:
@@ -417,20 +444,46 @@ def _progress_ui():
 if run:
     try:
         progress_update, progress_close = _progress_ui()
-
         t0 = time.time()
-        items = collect_results(
-            uf=None if not 'uf' in locals() else (uf or None),
-            keyword=(keyword or "").strip(),
-            page_size=DEFAULT_PAGE_SIZE,
-            max_pages=MAX_PAGES,
-            status_ui=status_ui,
-            progress_cb=progress_update,
-        )
-        rows = [normalize_item(it) for it in items]
+
+        muni_selected = st.session_state.muni_selected or []
+
+        all_items: List[dict] = []
+        if muni_selected:
+            # Resolve código PNCP e busca por municipio_id (modo “aprovado”)
+            resolved: Dict[str, str] = {}
+            for m in muni_selected:
+                mid = resolve_pncp_municipio_id(uf, m)
+                if mid:
+                    resolved[m] = mid
+            if not resolved:
+                st.warning("Não foi possível resolver códigos PNCP para os municípios selecionados. Buscando por UF…")
+                all_items = fetch_pages_by_uf(uf, keyword, status_ui,
+                                              page_size=DEFAULT_PAGE_SIZE,
+                                              max_pages=MAX_PAGES,
+                                              progress_cb=progress_update)
+            else:
+                # coleta por cada município e une resultados
+                for i, (m, mid) in enumerate(resolved.items(), 1):
+                    items_m = fetch_pages_by_municipio_id(mid, keyword, status_ui,
+                                                          page_size=DEFAULT_PAGE_SIZE,
+                                                          max_pages=MAX_PAGES)
+                    all_items.extend(items_m)
+                    if progress_update:
+                        progress_update(min(i / max(1, len(resolved)), 0.95))
+                if progress_update:
+                    progress_update(1.0)
+        else:
+            # Sem municípios: busca por UF (fallback)
+            all_items = fetch_pages_by_uf(uf, keyword, status_ui,
+                                          page_size=DEFAULT_PAGE_SIZE,
+                                          max_pages=MAX_PAGES,
+                                          progress_cb=progress_update)
+
+        rows = [normalize_item(it) for it in all_items]
         df = pd.DataFrame(rows)
 
-        # Pós-filtro por "Situação" quando caímos no fallback sem status
+        # Se foi fallback catalog2 (sem status aplicado), mantemos pós-filtro:
         if not df.empty:
             if status_ui == "divulgado":
                 df = df[df["Situação"].str.contains("divulg", case=False, na=False)]
@@ -439,10 +492,13 @@ if run:
             elif status_ui == "concluido":
                 df = df[df["Situação"].str.contains("conclu", case=False, na=False)]
 
-        # Filtro por municípios selecionados
-        muni_selected = st.session_state.muni_selected or []
+        # Filtro por municípios selecionados (só por garantia)
         if muni_selected and not df.empty:
             df = df[df["Cidade"].isin(set(muni_selected))].reset_index(drop=True)
+
+        # Deduplicar por link (quando unimos vários municípios)
+        if "Link para o edital" in df.columns and not df.empty:
+            df = df.drop_duplicates(subset=["Link para o edital"]).reset_index(drop=True)
 
         # Colunas de exibição
         display_cols = [
@@ -455,14 +511,13 @@ if run:
                 df[c] = ""
         df = df[display_cols]
 
-        # Fecha a barra e mostra a tabela
         progress_close()
 
         with table_area:
             st.subheader("Resultados")
             st.dataframe(df, use_container_width=True, hide_index=True)
 
-        # Download XLSX em destaque (sem CSV)
+        # Download XLSX
         if not df.empty:
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as xw:
@@ -478,7 +533,7 @@ if run:
                     type="primary",
                 )
 
-        # Lista por cidade (abaixo da tabela)
+        # Lista por cidade
         with details_area:
             if not df.empty:
                 st.markdown("### Editais por cidade (lista)")
