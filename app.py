@@ -1,307 +1,385 @@
 # app.py
 from __future__ import annotations
-import os
-import json
+
 import io
-from pathlib import Path
+import math
+import time
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
 import streamlit as st
 
-# ==========================
-# Config
-# ==========================
+# =========================
+# Configuração do Streamlit
+# =========================
 st.set_page_config(
     page_title="🧭 Acerte Licitações — O seu Buscador de Editais",
     page_icon="🧭",
     layout="wide",
 )
 
-TITLE = "🧭 Acerte Licitações — O seu Buscador de Editais"
+st.title("🧭 Acerte Licitações — O seu Buscador de Editais")
+st.caption(
+    "Busque editais no PNCP por UF e palavra-chave. A lista abaixo mostra os resultados consolidados; "
+    "os links já apontam para a página correta de **Editais**."
+)
 
-PNCP_API = "https://pncp.gov.br/api/search"
-INDEX = "catalog2"           # índice estável que usamos
-DOC_TYPE = "_doc"
-DEFAULT_STATUS = "recebendo_proposta"  # foco no que está aberto
-MAX_PAGES = 12               # limite interno de páginas para evitar consultas muito longas
-PAGE_SIZE = 100              # fixo (não expõe no UI)
-TIMEOUT = 25
+# ================
+# Parâmetros gerais
+# ================
+BASE_API = "https://pncp.gov.br/api/search"
+TIMEOUT = 30
+UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
+HDRS = {
+    "User-Agent": UA,
+    "Referer": "https://pncp.gov.br/app/editais",
+    "Accept-Language": "pt-BR,pt;q=0.9",
+}
 
-SAVED_FILE = Path("saved_searches.json")
-
-UF_LIST = [
-    "AC","AL","AM","AP","BA","CE","DF","ES","GO","MA","MG",
-    "MS","MT","PA","PB","PE","PI","PR","RJ","RN","RO","RR",
-    "RS","SC","SE","SP","TO"
+UFS = [
+    "", "AC", "AL", "AM", "AP", "BA", "CE", "DF", "ES", "GO",
+    "MA", "MG", "MS", "MT", "PA", "PB", "PE", "PI", "PR",
+    "RJ", "RN", "RO", "RR", "RS", "SC", "SE", "SP", "TO",
 ]
 
-# ==========================
-# Helpers: Saved Searches
-# ==========================
-def load_saved() -> Dict[str, Dict]:
+# =======================
+# Utilitários de formatação
+# =======================
+def _parse_dt(val: Optional[str]) -> Optional[pd.Timestamp]:
+    if not val:
+        return None
     try:
-        if SAVED_FILE.exists():
-            return json.loads(SAVED_FILE.read_text(encoding="utf-8"))
+        # Tenta ISO
+        return pd.to_datetime(val, utc=False, errors="coerce")
     except Exception:
-        pass
-    return {}
+        return None
 
-def save_saved(data: Dict[str, Dict]) -> None:
-    try:
-        SAVED_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        # se não conseguir persistir em disco, ainda guardamos em sessão
-        st.session_state["_saved_fallback"] = data
+def _fmt_br(dt: Optional[pd.Timestamp]) -> str:
+    if isinstance(dt, pd.Timestamp) and not pd.isna(dt):
+        # Se tiver hora, mostra com hora; senão, só a data
+        if dt.hour or dt.minute or dt.second:
+            return dt.strftime("%d/%m/%Y %H:%M")
+        return dt.strftime("%d/%m/%Y")
+    return ""
 
-def get_saved_from_state() -> Dict[str, Dict]:
-    disk = load_saved()
-    mem = st.session_state.get("_saved_fallback", {})
-    # prefer disk, merge mem keys
-    merged = {**mem, **disk}
-    return merged
+def _extract_items_total(js: dict) -> Tuple[List[dict], int]:
+    """Extrai (items, total) de diversos formatos que o PNCP usa."""
+    if not isinstance(js, dict):
+        return [], 0
 
-# ==========================
-# PNCP Fetch (API)
-# ==========================
-def fetch_page(uf: str, page: int, keyword: str = "") -> Tuple[List[dict], int]:
-    """
-    Consulta 1 página do índice 'catalog2' filtrando por UF e status.
-    Retorna (itens, total_aprox)
-    """
-    params = {
-        "index": INDEX,
-        "doc_type": DOC_TYPE,
-        "pagina": page,
-        "tam_pagina": PAGE_SIZE,
-        "ordenacao": "-data_publicacao_pncp",
-        "uf": uf,
-        "status": DEFAULT_STATUS,
-        "document_type": "edital",
-    }
-    if keyword.strip():
-        params["q"] = keyword.strip()
-
-    r = requests.get(PNCP_API, params=params, timeout=TIMEOUT)
-    r.raise_for_status()
-    js = r.json()
-
-    # achar lista de itens
+    # Onde costuma vir a lista
     items = []
-    for key in ("items","results","conteudo","licitacoes","data","documents","documentos"):
-        if isinstance(js, dict) and isinstance(js.get(key), list):
-            items = js[key]
+    for items_key in ("items", "results", "licitacoes", "documentos", "conteudo", "data"):
+        if isinstance(js.get(items_key), list):
+            items = js[items_key]
             break
+    else:
+        data = js.get("data") or {}
+        if isinstance(data, dict) and isinstance(data.get("items"), list):
+            items = data["items"]
 
-    total = int(js.get("total", len(items))) if isinstance(js, dict) else len(items)
-    return items, total
+    # Onde costuma vir o total
+    total = 0
+    for total_key in ("total", "total_results", "totalItems", "count"):
+        if isinstance(js.get(total_key), int):
+            total = js[total_key]
+            break
+    if not total:
+        data = js.get("data") or {}
+        if isinstance(data, dict) and isinstance(data.get("total"), int):
+            total = data["total"]
 
-def collect_results(uf: str, keyword: str = "") -> pd.DataFrame:
-    all_rows: List[dict] = []
-    total_hint = None
+    if not total and items:
+        total = len(items)
+    return items or [], int(total or 0)
 
-    for page in range(1, MAX_PAGES + 1):
-        items, total = fetch_page(uf=uf, page=page, keyword=keyword)
-        total_hint = total
+def fetch_page(
+    uf: Optional[str],
+    page: int,
+    page_size: int = 100,
+    keyword: str = "",
+    status: str = "recebendo_proposta",
+) -> Tuple[List[Dict], int]:
+    """
+    1) Tenta a API 'clássica' (mais estável): tipos_documento=edital, ordenacao=-data.
+    2) Se vier 400/422, cai para 'catalog2': index=catalog2&doc_type=_doc&document_type=edital&ordenacao=-data_publicacao_pncp.
+    Retorna (items, total).
+    """
+    # --- tentativa 1: clássica ---
+    params1 = {
+        "tipos_documento": "edital",
+        "pagina": page,
+        "tam_pagina": page_size,
+        "ordenacao": "-data",
+    }
+    if uf:
+        params1["uf"] = uf
+    if status:
+        params1["status"] = status
+    if keyword:
+        params1["termo"] = keyword
+
+    r = requests.get(BASE_API, params=params1, headers=HDRS, timeout=TIMEOUT)
+    if r.status_code < 400:
+        return _extract_items_total(r.json())
+
+    if r.status_code not in (400, 422):
+        r.raise_for_status()
+
+    # --- tentativa 2: catalog2 ---
+    params2 = {
+        "index": "catalog2",
+        "doc_type": "_doc",
+        "document_type": "edital",
+        "pagina": page,
+        "tam_pagina": page_size,
+        "ordenacao": "-data_publicacao_pncp",
+    }
+    if uf:
+        params2["uf"] = uf
+    if keyword:
+        params2["termo"] = keyword
+    if status:
+        params2["status"] = status
+
+    r2 = requests.get(BASE_API, params=params2, headers=HDRS, timeout=TIMEOUT)
+    r2.raise_for_status()
+    return _extract_items_total(r2.json())
+
+def collect_results(
+    uf: Optional[str],
+    keyword: str = "",
+    page_size: int = 100,
+    max_pages: int = 30,
+    progress_cb=None,
+) -> List[Dict]:
+    """Varre paginação usando fetch_page com fallback automático."""
+    all_items: List[Dict] = []
+    page = 1
+    total_known = None
+
+    while page <= max_pages:
+        items, total = fetch_page(uf=uf, page=page, page_size=page_size, keyword=keyword)
+        if total_known is None:
+            total_known = total
+
         if not items:
             break
 
-        for it in items:
-            # campos conforme pedido
-            title = it.get("title") or ""
-            description = it.get("description") or ""
-            item_url = it.get("item_url") or ""
-            document_type = it.get("document_type") or ""
-            orgao_nome = it.get("orgao_nome") or ""
-            unidade_nome = it.get("unidade_nome") or ""
-            esfera_nome = it.get("esfera_nome") or ""
-            modalidade_nome = it.get("modalidade_licitacao_nome") or ""
-            data_pub = it.get("data_publicacao_pncp") or ""
-            data_fim_vig = it.get("data_fim_vigencia") or ""
-            tipo_nome = it.get("tipo_nome") or ""
-            municipio_nome = it.get("municipio_nome") or ""
-            uf_val = it.get("uf") or ""
+        all_items.extend(items)
 
-            cnpj = (it.get("orgao_cnpj") or "").strip()
-            ano = (it.get("ano") or "").strip()
-            num = (it.get("numero_sequencial") or "").strip()
-            link_final = ""
-            if len(cnpj) == 14 and len(ano) == 4 and num:
-                link_final = f"https://pncp.gov.br/app/editais/{cnpj}/{ano}/{num}"
-            elif item_url:
-                # fallback (corrige /app/compras -> /app/editais)
-                link_final = "https://pncp.gov.br" + item_url.replace("/app/compras/", "/app/editais/").replace("/compras/","/app/editais/")
+        if progress_cb and total:
+            progress_cb(min(len(all_items) / total, 0.99))
 
-            all_rows.append({
-                "Cidade": municipio_nome,
-                "UF": uf_val,
-                "Título": title,
-                "Objeto": description,
-                "Link para o edital": link_final,
-                "Tipo": document_type,
-                "Orgão": orgao_nome,
-                "Unidade": unidade_nome,
-                "Esfera": esfera_nome,
-                "Modalidade": modalidade_nome,
-                "Publicação": data_pub,
-                "Fim do envio de proposta": data_fim_vig,
-                "Tipo (nome)": tipo_nome,
-            })
-
-        # feedback de progresso
-        done = min(page * PAGE_SIZE, total_hint or page * PAGE_SIZE)
-        yield_rows = pd.DataFrame(all_rows)
-        yield (page, total_hint or 0, yield_rows)
-
-        if len(items) < PAGE_SIZE:
+        # Se já pegou tudo, para
+        if total and len(all_items) >= total:
             break
 
-    # final
-    final_df = pd.DataFrame(all_rows)
-    yield (None, total_hint or len(final_df), final_df)
+        page += 1
 
-# ==========================
-# UI
-# ==========================
-st.markdown(f"## {TITLE}")
+    if progress_cb:
+        progress_cb(1.0)
 
-with st.sidebar:
-    st.markdown("### 🔎 Filtros")
-    uf = st.selectbox("UF", UF_LIST, index=UF_LIST.index("SP") if "SP" in UF_LIST else 0)
-    keyword = st.text_input("Palavra-chave (opcional)", value="")
+    return all_items
 
-    st.markdown("---")
-    st.markdown("### 🗂️ Pesquisas salvas")
-    saved = get_saved_from_state()
-    saved_names = sorted(saved.keys())
-    chosen_saved = st.selectbox("Carregar pesquisa", ["(nenhuma)"] + saved_names)
+def _build_link(item: dict) -> str:
+    """
+    Gera link final para /app/editais/{cnpj}/{ano}/{seq}
+    - Se vier item_url começando com /compras/... converte para /app/editais/...
+    - Senão, tenta montar pelos campos cnpj/ano/numero_sequencial
+    """
+    # 1) Usa item_url se existir
+    url = (item.get("item_url") or "").strip()
+    if url:
+        # exemplos de entrada:
+        #   /compras/46634259000195/2025/201
+        #   /editais/46634259000195/2025/201
+        parts = url.strip("/").split("/")
+        # parts esperados: ["compras"|"editais", "{cnpj}", "{ano}", "{seq}"]
+        if len(parts) >= 4:
+            cnpj, ano, seq = parts[-3], parts[-2], parts[-1]
+            return f"https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}"
 
-    if chosen_saved != "(nenhuma)":
-        preset = saved[chosen_saved]
-        # mostra breve resumo
-        st.caption(f"**{chosen_saved}** — {len(preset.get('municipios', []))} município(s)")
-    else:
-        preset = {"municipios": []}
+    # 2) Monta pelos campos soltos
+    cnpj = str(item.get("orgao_cnpj") or "").strip()
+    ano = str(item.get("ano") or "").strip()
+    seq = str(item.get("numero_sequencial") or "").strip()
+    if len(cnpj) == 14 and len(ano) == 4 and seq:
+        return f"https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}"
 
-    st.markdown("### 📝 Definir/editar pesquisa")
-    new_name = st.text_input("Nome da pesquisa")
-    municipios_text = st.text_area(
-        "Municípios (um por linha, ex.: 'Porto Feliz', 'Sorocaba')",
-        value="\n".join(preset.get("municipios", [])),
-        height=160,
-        placeholder="Ex.:\nPorto Feliz\nTatuí\nSorocaba",
+    # 3) Se não deu, retorna vazio
+    return ""
+
+def normalize_item(item: dict) -> dict:
+    """
+    Normaliza campos para o DataFrame final.
+    Tenta múltiplos nomes de campos para cobrir variações da API.
+    """
+    title = item.get("title") or item.get("titulo") or ""
+    description = item.get("description") or item.get("descricao") or ""
+    document_type = item.get("document_type") or item.get("tipo_documento") or ""
+    orgao_nome = item.get("orgao_nome") or item.get("orgao") or ""
+    unidade_nome = item.get("unidade_nome") or item.get("unidade") or ""
+    esfera_nome = item.get("esfera_nome") or item.get("esfera") or ""
+    modalidade = (
+        item.get("modalidade_licitacao_nome")
+        or item.get("modalidade")
+        or item.get("modalidade_nome")
+        or ""
     )
-    col_s1, col_s2, col_s3 = st.columns(3)
-    with col_s1:
-        if st.button("💾 Salvar pesquisa"):
-            nm = new_name.strip()
-            muns = [m.strip() for m in municipios_text.splitlines() if m.strip()]
-            if nm:
-                saved[nm] = {"municipios": muns}
-                save_saved(saved)
-                st.success(f"Pesquisa '{nm}' salva ({len(muns)} município(s)). Atualize a caixa de seleção acima para vê-la.")
-            else:
-                st.warning("Informe um nome para a pesquisa antes de salvar.")
-    with col_s2:
-        if st.button("🗑️ Excluir pesquisa"):
-            nm = new_name.strip()
-            if nm and nm in saved:
-                del saved[nm]
-                save_saved(saved)
-                st.success(f"Pesquisa '{nm}' excluída.")
-            else:
-                st.warning("Informe o nome exato de uma pesquisa existente.")
-    with col_s3:
-        if st.button("🔁 Carregar no editor"):
-            if chosen_saved != "(nenhuma)":
-                st.session_state["__prefill_name"] = chosen_saved
-                st.session_state["__prefill_muns"] = "\n".join(saved[chosen_saved].get("municipios", []))
-            else:
-                st.info("Selecione uma pesquisa salva para pré-carregar.")
+    tipo_nome = item.get("tipo_nome") or item.get("tipo") or ""
+    municipio_nome = item.get("municipio_nome") or item.get("municipio") or ""
+    uf = item.get("uf") or ""
 
-# prefill se solicitado
-if "__prefill_name" in st.session_state:
-    st.session_state.pop("__prefill_name")
+    dt_pub = _parse_dt(item.get("data_publicacao_pncp") or item.get("dataPublicacao"))
+    dt_fim = _parse_dt(item.get("data_fim_vigencia") or item.get("dataFimVigencia"))
 
-if "__prefill_muns" in st.session_state:
-    st.session_state.pop("__prefill_muns")
+    link = _build_link(item)
 
-st.markdown("---")
+    return {
+        "Cidade": municipio_nome,
+        "UF": uf,
+        "Título": title,
+        "Objeto": description,
+        "Link para o edital": link,
+        "Tipo": document_type,
+        "Orgão": orgao_nome,
+        "Unidade": unidade_nome,
+        "Esfera": esfera_nome,
+        "Modalidade": modalidade,
+        "Publicação": _fmt_br(dt_pub),
+        "Fim do envio de proposta": _fmt_br(dt_fim),
+        "Tipo (nome)": tipo_nome,
+        # Úteis para debug/investigação (não exibidos por padrão)
+        "_raw_item_url": item.get("item_url", ""),
+    }
 
-run_col1, run_col2 = st.columns([1,3])
-with run_col1:
-    run = st.button("🚀 Executar busca")
-
-progress = st.empty()
-status_text = st.empty()
-table_placeholder = st.empty()
+# ==================
+# Barra lateral (UI)
+# ==================
+with st.sidebar:
+    st.subheader("Parâmetros da busca")
+    uf = st.selectbox("UF (opcional)", UFS, index=UFS.index("SP"))
+    keyword = st.text_input("Palavra-chave (opcional)", value="")
+    page_size = 100  # fixado (conforme pedido)
+    max_pages = st.slider("Páginas a varrer (limite de segurança)", 1, 50, 10)
+    run = st.button("Executar busca", type="primary", use_container_width=True)
 
 # ==========================
-# Execução
+# Resultado principal (tabela)
 # ==========================
+result_placeholder = st.empty()
+download_placeholder = st.empty()
+summary_placeholder = st.empty()
+details_placeholder = st.container()
+
 if run:
-    # barra de progresso
-    prog = progress.progress(0, text="Iniciando consulta ao PNCP…")
-    collected_df = pd.DataFrame()
-
-    page_count_est = MAX_PAGES
-    pages_done = 0
+    st.toast("Iniciando busca no PNCP…", icon="🔎")
+    progress = st.progress(0.0)
+    status = st.status("Consultando API do PNCP…", expanded=False)
 
     try:
-        for page_info in collect_results(uf=uf, keyword=keyword):
-            page, total_hint, partial_df = page_info
-            collected_df = partial_df.copy()
+        t0 = time.time()
+        # coleta com progresso
+        items = collect_results(
+            uf=(uf or None),
+            keyword=keyword.strip(),
+            page_size=page_size,
+            max_pages=max_pages,
+            progress_cb=progress.progress,
+        )
 
-            if page is None:
-                # final
-                prog.progress(100, text=f"Concluído. Total estimado: {total_hint} itens.")
-                break
-            else:
-                pages_done += 1
-                pct = int(min(100, (pages_done / page_count_est) * 100))
-                prog.progress(pct, text=f"Coletando página {page}…")
+        norm_rows = [normalize_item(it) for it in items]
+        df = pd.DataFrame(norm_rows)
 
-        # filtro por municípios (cliente) se houver lista
-        municipios_filter = [m.strip().lower() for m in municipios_text.splitlines() if m.strip()]
-        if municipios_filter:
-            mask = collected_df["Cidade"].fillna("").str.lower().isin(municipios_filter)
-            collected_df = collected_df[mask].reset_index(drop=True)
+        # Filtra apenas colunas de exibição
+        display_cols = [
+            "Cidade",
+            "UF",
+            "Título",
+            "Objeto",
+            "Link para o edital",
+            "Tipo",
+            "Orgão",
+            "Unidade",
+            "Esfera",
+            "Modalidade",
+            "Publicação",
+            "Fim do envio de proposta",
+            "Tipo (nome)",
+        ]
+        for c in display_cols:
+            if c not in df.columns:
+                df[c] = ""
+        df = df[display_cols]
 
-        # render tabela
-        if collected_df.empty:
-            table_placeholder.info("Nenhum resultado para os filtros selecionados.")
-        else:
-            # ordenar por data de publicação desc (quando possível)
-            def to_ts(x):
-                try:
-                    return pd.to_datetime(x, errors="coerce")
-                except Exception:
-                    return pd.NaT
-            if "Publicação" in collected_df.columns:
-                collected_df["_ord"] = collected_df["Publicação"].apply(to_ts)
-                collected_df = collected_df.sort_values("_ord", ascending=False, na_position="last").drop(columns=["_ord"]).reset_index(drop=True)
-
-            table_placeholder.dataframe(collected_df, use_container_width=True)
-
-            # botão XLSX (sem CSV, por pedido)
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                collected_df.to_excel(writer, index=False, sheet_name="PNCP")
-            st.download_button(
-                "⬇️ Baixar XLSX",
-                data=buf.getvalue(),
-                file_name=f"pncp_{uf}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=False
+        # Mostra a tabela primeiro (como solicitado)
+        with result_placeholder:
+            st.subheader("Resultados")
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
             )
 
-        status_text.success("Busca finalizada.")
+        # Download XLSX (apenas)
+        if not df.empty:
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False, sheet_name="PNCP")
+            buf.seek(0)
+            with download_placeholder:
+                st.download_button(
+                    "⬇️ Baixar XLSX",
+                    data=buf,
+                    file_name=f"pncp_resultados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    type="primary",
+                )
 
+        elapsed = time.time() - t0
+        with summary_placeholder:
+            st.success(
+                f"Busca concluída: {len(df)} registro(s) em {elapsed:.1f}s.",
+                icon="✅",
+            )
+
+        # Lista por cidade (abaixo da tabela, como combinado)
+        with details_placeholder:
+            if not df.empty:
+                st.markdown("### Editais por cidade (lista)")
+                grp = df.groupby(["Cidade", "UF"], dropna=False)
+                for (cidade, ufv), g in grp:
+                    st.markdown(f"**{cidade or '-'} / {ufv or '-'}** — {len(g)} edital(is)")
+                    for _, row in g.iterrows():
+                        titulo = (row.get("Título") or "").strip() or "(sem título)"
+                        link = (row.get("Link para o edital") or "").strip()
+                        objeto = (row.get("Objeto") or "").strip()
+                        if link:
+                            st.markdown(f"- [{titulo}]({link})  \n  _{objeto}_")
+                        else:
+                            st.markdown(f"- {titulo}  \n  _{objeto}_")
+
+        status.update(label="Pronto!", state="complete", expanded=False)
+        st.toast("Concluído!", icon="🎉")
+
+    except requests.HTTPError as e:
+        status.update(
+            label="Falha na busca. Tente novamente em instantes.",
+            state="error",
+            expanded=True,
+        )
+        st.error(
+            f"Falha na busca. Tente novamente em instantes.\n\n{e.__class__.__name__}: {e}",
+            icon="🛑",
+        )
     except Exception as e:
-        status_text.error("Falha na busca. Tente novamente em instantes.")
+        status.update(
+            label="Ocorreu um erro inesperado.",
+            state="error",
+            expanded=True,
+        )
         st.exception(e)
-else:
-    st.caption("Defina os filtros na barra lateral e clique em **Executar busca**.")
