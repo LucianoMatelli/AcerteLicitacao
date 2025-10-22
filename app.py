@@ -21,13 +21,13 @@ st.set_page_config(
 )
 st.title("🧭 Acerte Licitações — O seu Buscador de Editais")
 st.caption(
-    "Busque editais no PNCP por UF e (opcionalmente) por municípios. "
-    "A lista de municípios é carregada do IBGE automaticamente para a UF escolhida."
+    "Pesquise editais no PNCP por municípios. "
+    "A UF é usada apenas para carregar a lista de cidades do IBGE."
 )
 
-# ================
-# Parâmetros gerais
-# ================
+# ===========
+# Constantes
+# ===========
 PNCP_API = "https://pncp.gov.br/api/search"
 IBGE_ESTADOS = "https://servicodados.ibge.gov.br/api/v1/localidades/estados?order=nome"
 IBGE_MUNS_BY_UF_ID = "https://servicodados.ibge.gov.br/api/v1/localidades/estados/{uf_id}/municipios?order=nome"
@@ -39,7 +39,7 @@ HDRS = {"User-Agent": UA, "Referer": "https://pncp.gov.br/app/editais", "Accept-
 UFS = ["", "AC","AL","AM","AP","BA","CE","DF","ES","GO","MA","MG","MS","MT","PA","PB","PE","PI","PR","RJ","RN","RO","RR","RS","SC","SE","SP","TO"]
 
 DEFAULT_PAGE_SIZE = 100
-MAX_PAGES = 60  # aumentamos para não cortar resultados
+MAX_PAGES = 60  # para não cortar resultados longos
 
 # =======================
 # Estado / utilitários
@@ -130,6 +130,7 @@ def _extract_items_total(js: dict) -> Tuple[List[dict], int]:
     return items or [], int(total or 0)
 
 def _build_link(item: dict) -> str:
+    # Garante caminho /app/editais/<cnpj>/<ano>/<seq>
     url = (item.get("item_url") or "").strip()
     if url:
         parts = url.strip("/").split("/")
@@ -188,14 +189,14 @@ def normalize_item(item: dict) -> dict:
 @st.cache_data(ttl=86400, show_spinner=False)
 def resolve_pncp_municipio_id(uf: str, municipio_nome: str) -> Optional[str]:
     """
-    Faz algumas buscas no índice catalog2 e retorna o municipio_id mais
-    frequente que *bate exatamente* (ignorando acentos e caixa) com o nome do IBGE.
+    Busca no índice catalog2 e retorna o municipio_id mais frequente que
+    bate exatamente (ignorando acentos/caixa) com o nome do IBGE.
     """
     uf = (uf or "").strip().upper()
     alvo = _norm(municipio_nome)
-
     contagem: Dict[str, int] = {}
-    for pagina in range(1, 4):  # 3 páginas de amostra bastam p/ achar o id
+
+    for pagina in range(1, 4):  # 3 páginas de amostra geralmente bastam
         params = {
             "index": "catalog2",
             "doc_type": "_doc",
@@ -204,7 +205,7 @@ def resolve_pncp_municipio_id(uf: str, municipio_nome: str) -> Optional[str]:
             "tam_pagina": 100,
             "ordenacao": "-data_publicacao_pncp",
             "uf": uf,
-            "termo": municipio_nome,  # ajuda a trazer itens do município correto
+            "termo": municipio_nome,
         }
         try:
             r = requests.get(PNCP_API, params=params, headers=HDRS, timeout=TIMEOUT)
@@ -223,72 +224,13 @@ def resolve_pncp_municipio_id(uf: str, municipio_nome: str) -> Optional[str]:
 
     if not contagem:
         return None
-    # retorna o id mais frequente
     return max(contagem.items(), key=lambda kv: kv[1])[0]
 
 # --------------------------------------------------------
-# Coleta por UF (fallback) e por MUNICIPIO_ID (preferível)
+# Coleta por MUNICIPIO_ID (modo “aprovado”, apenas município)
 # --------------------------------------------------------
-def fetch_pages_by_uf(uf: str, keyword: str, status_ui: str,
-                      page_size: int = DEFAULT_PAGE_SIZE, max_pages: int = MAX_PAGES,
-                      progress_cb=None) -> List[dict]:
-    all_items: List[dict] = []
-    page = 1
-    total_known = None
-    while page <= max_pages:
-        # tentativa 1: API clássica por UF
-        params1 = {
-            "tipos_documento": "edital",
-            "pagina": page,
-            "tam_pagina": page_size,
-            "ordenacao": "-data",
-            "status": status_ui,
-            "uf": uf,
-        }
-        if keyword:
-            params1["termo"] = keyword
-
-        r = requests.get(PNCP_API, params=params1, headers=HDRS, timeout=TIMEOUT)
-        if r.status_code < 400:
-            items, total = _extract_items_total(r.json())
-        else:
-            # fallback catalog2
-            params2 = {
-                "index": "catalog2",
-                "doc_type": "_doc",
-                "document_type": "edital",
-                "pagina": page,
-                "tam_pagina": page_size,
-                "ordenacao": "-data_publicacao_pncp",
-                "uf": uf,
-            }
-            if keyword:
-                params2["termo"] = keyword
-            r2 = requests.get(PNCP_API, params=params2, headers=HDRS, timeout=TIMEOUT)
-            r2.raise_for_status()
-            items, total = _extract_items_total(r2.json())
-
-        if total_known is None:
-            total_known = total
-        if not items:
-            break
-
-        all_items.extend(items)
-        if progress_cb and total:
-            progress_cb(min(len(all_items) / total, 0.99))
-        if total and len(all_items) >= total:
-            break
-        page += 1
-
-    if progress_cb:
-        progress_cb(1.0)
-    return all_items
-
 def fetch_pages_by_municipio_id(muni_id: str, keyword: str, status_ui: str,
                                 page_size: int = DEFAULT_PAGE_SIZE, max_pages: int = MAX_PAGES) -> List[dict]:
-    """
-    Modo que replica a versão 'aprovada': usa 'municipios=<id>' na API clássica.
-    """
     all_items: List[dict] = []
     page = 1
     while page <= max_pages:
@@ -305,7 +247,7 @@ def fetch_pages_by_municipio_id(muni_id: str, keyword: str, status_ui: str,
 
         r = requests.get(PNCP_API, params=params, headers=HDRS, timeout=TIMEOUT)
         if r.status_code >= 400:
-            break  # se a clássica falhar para município, paramos (costuma ser suficiente)
+            break
         items, total = _extract_items_total(r.json())
         if not items:
             break
@@ -320,7 +262,8 @@ def fetch_pages_by_municipio_id(muni_id: str, keyword: str, status_ui: str,
 # ==================
 with st.sidebar:
     st.subheader("Parâmetros da busca")
-    uf = st.selectbox("UF", UFS, index=UFS.index("SP"))
+
+    uf = st.selectbox("UF (para listar municípios)", UFS, index=UFS.index("SP"))
     keyword = st.text_input("Palavra-chave (opcional)", value="")
 
     st.markdown("#### Status do edital")
@@ -330,7 +273,7 @@ with st.sidebar:
     st.divider()
     st.markdown("#### Municípios (IBGE)")
 
-    # Recarrega lista de municípios automaticamente quando a UF muda
+    # Recarrega lista de municípios quando a UF muda
     try:
         muni_choices = _ibge_municipios_por_uf(uf) if uf else []
         st.session_state.muni_choices = muni_choices
@@ -367,9 +310,7 @@ with st.sidebar:
                     st.session_state.muni_selected.remove(m)
                     st.experimental_rerun()
     else:
-        st.caption("Nenhum município selecionado (opcional).")
-
-    st.caption(f"{len(st.session_state.muni_choices)} município(s) disponíveis para {uf or '—'}.")
+        st.caption("Nenhum município selecionado (obrigatório para pesquisar).")
 
     st.divider()
     st.markdown("#### Pesquisas salvas")
@@ -426,131 +367,115 @@ table_area = st.empty()
 download_area = st.empty()
 details_area = st.container()
 
-def _progress_ui():
-    """Barra de carregamento 'aprovada'."""
+def progress_municipio_ui():
+    """Indicador que mostra QUAL município está sendo pesquisado (sem porcentagem)."""
     box = st.container()
     with box:
         st.markdown("##### Carregando resultados do PNCP…")
-        pb = st.progress(0.0)
-        pct = st.empty()
-    def updater(frac: float):
-        pct_num = int(max(0, min(100, round(frac * 100))))
-        pb.progress(frac)
-        pct.markdown(f"**{pct_num}%** concluído")
+        current = st.empty()
+    def set_city(name: str, idx: int, total: int):
+        current.markdown(f"**Pesquisando {idx}/{total}: {name}**")
     def close():
         box.empty()
-    return updater, close
+    return set_city, close
 
 if run:
     try:
-        progress_update, progress_close = _progress_ui()
-        t0 = time.time()
-
         muni_selected = st.session_state.muni_selected or []
+        if not muni_selected:
+            st.warning("Selecione ao menos um município para pesquisar.", icon="⚠️")
+        else:
+            set_city, close_city = progress_municipio_ui()
+            t0 = time.time()
 
-        all_items: List[dict] = []
-        if muni_selected:
-            # Resolve código PNCP e busca por municipio_id (modo “aprovado”)
+            # 1) Resolver cod PNCP
             resolved: Dict[str, str] = {}
             for m in muni_selected:
+                set_city(m, len(resolved)+1, len(muni_selected))
                 mid = resolve_pncp_municipio_id(uf, m)
                 if mid:
                     resolved[m] = mid
+
             if not resolved:
-                st.warning("Não foi possível resolver códigos PNCP para os municípios selecionados. Buscando por UF…")
-                all_items = fetch_pages_by_uf(uf, keyword, status_ui,
-                                              page_size=DEFAULT_PAGE_SIZE,
-                                              max_pages=MAX_PAGES,
-                                              progress_cb=progress_update)
+                close_city()
+                st.error("Não foi possível resolver códigos PNCP para os municípios selecionados.", icon="🛑")
             else:
-                # coleta por cada município e une resultados
-                for i, (m, mid) in enumerate(resolved.items(), 1):
-                    items_m = fetch_pages_by_municipio_id(mid, keyword, status_ui,
-                                                          page_size=DEFAULT_PAGE_SIZE,
-                                                          max_pages=MAX_PAGES)
+                # 2) Buscar por município (API clássica com municipios=<id>)
+                all_items: List[dict] = []
+                total_cities = len(resolved)
+                for idx, (m, mid) in enumerate(resolved.items(), start=1):
+                    set_city(m, idx, total_cities)
+                    items_m = fetch_pages_by_municipio_id(
+                        muni_id=mid,
+                        keyword=st.session_state.get("keyword", "") or "",
+                        status_ui=st.session_state.get("status", "") or status_ui,
+                        page_size=DEFAULT_PAGE_SIZE,
+                        max_pages=MAX_PAGES,
+                    )
                     all_items.extend(items_m)
-                    if progress_update:
-                        progress_update(min(i / max(1, len(resolved)), 0.95))
-                if progress_update:
-                    progress_update(1.0)
-        else:
-            # Sem municípios: busca por UF (fallback)
-            all_items = fetch_pages_by_uf(uf, keyword, status_ui,
-                                          page_size=DEFAULT_PAGE_SIZE,
-                                          max_pages=MAX_PAGES,
-                                          progress_cb=progress_update)
 
-        rows = [normalize_item(it) for it in all_items]
-        df = pd.DataFrame(rows)
+                close_city()
 
-        # Se foi fallback catalog2 (sem status aplicado), mantemos pós-filtro:
-        if not df.empty:
-            if status_ui == "divulgado":
-                df = df[df["Situação"].str.contains("divulg", case=False, na=False)]
-            elif status_ui == "em_andamento":
-                df = df[df["Situação"].str.contains("andament", case=False, na=False)]
-            elif status_ui == "concluido":
-                df = df[df["Situação"].str.contains("conclu", case=False, na=False)]
+                # 3) Normalizar, deduplicar e exibir
+                rows = [normalize_item(it) for it in all_items]
+                df = pd.DataFrame(rows)
 
-        # Filtro por municípios selecionados (só por garantia)
-        if muni_selected and not df.empty:
-            df = df[df["Cidade"].isin(set(muni_selected))].reset_index(drop=True)
+                # Filtrar pós (só por garantia)
+                if muni_selected and not df.empty:
+                    df = df[df["Cidade"].isin(set(muni_selected))].reset_index(drop=True)
 
-        # Deduplicar por link (quando unimos vários municípios)
-        if "Link para o edital" in df.columns and not df.empty:
-            df = df.drop_duplicates(subset=["Link para o edital"]).reset_index(drop=True)
+                # Deduplicar por link
+                if "Link para o edital" in df.columns and not df.empty:
+                    df = df.drop_duplicates(subset=["Link para o edital"]).reset_index(drop=True)
 
-        # Colunas de exibição
-        display_cols = [
-            "Cidade", "UF", "Título", "Objeto", "Link para o edital",
-            "Tipo", "Orgão", "Unidade", "Esfera", "Modalidade",
-            "Publicação", "Fim do envio de proposta", "Tipo (nome)",
-        ]
-        for c in display_cols:
-            if c not in df.columns:
-                df[c] = ""
-        df = df[display_cols]
+                display_cols = [
+                    "Cidade", "UF", "Título", "Objeto", "Link para o edital",
+                    "Tipo", "Orgão", "Unidade", "Esfera", "Modalidade",
+                    "Publicação", "Fim do envio de proposta", "Tipo (nome)", "Situação",
+                ]
+                for c in display_cols:
+                    if c not in df.columns:
+                        df[c] = ""
+                df = df[display_cols]
 
-        progress_close()
+                with table_area:
+                    st.subheader("Resultados")
+                    st.dataframe(df, use_container_width=True, hide_index=True)
 
-        with table_area:
-            st.subheader("Resultados")
-            st.dataframe(df, use_container_width=True, hide_index=True)
+                # Download XLSX (em destaque)
+                if not df.empty:
+                    buf = io.BytesIO()
+                    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+                        df.to_excel(xw, index=False, sheet_name="PNCP")
+                    buf.seek(0)
+                    with download_area:
+                        st.download_button(
+                            "⬇️ Baixar XLSX",
+                            data=buf,
+                            file_name=f"pncp_resultados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                            type="primary",
+                        )
 
-        # Download XLSX
-        if not df.empty:
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as xw:
-                df.to_excel(xw, index=False, sheet_name="PNCP")
-            buf.seek(0)
-            with download_area:
-                st.download_button(
-                    "⬇️ Baixar XLSX",
-                    data=buf,
-                    file_name=f"pncp_resultados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    type="primary",
-                )
+                # Lista por cidade
+                with details_area:
+                    if not df.empty:
+                        st.markdown("### Editais por cidade (lista)")
+                        grp = df.groupby(["Cidade", "UF"], dropna=False)
+                        for (cidade, ufv), g in grp:
+                            st.markdown(f"**{cidade or '-'} / {ufv or '-'}** — {len(g)} edital(is)")
+                            for _, row in g.iterrows():
+                                titulo = (row.get("Título") or "").strip() or "(sem título)"
+                                link = (row.get("Link para o edital") or "").strip()
+                                objeto = (row.get("Objeto") or "").strip()
+                                if link:
+                                    st.markdown(f"- [{titulo}]({link})  \n  _{objeto}_")
+                                else:
+                                    st.markdown(f"- {titulo}  \n  _{objeto}_")
 
-        # Lista por cidade
-        with details_area:
-            if not df.empty:
-                st.markdown("### Editais por cidade (lista)")
-                grp = df.groupby(["Cidade", "UF"], dropna=False)
-                for (cidade, ufv), g in grp:
-                    st.markdown(f"**{cidade or '-'} / {ufv or '-'}** — {len(g)} edital(is)")
-                    for _, row in g.iterrows():
-                        titulo = (row.get("Título") or "").strip() or "(sem título)"
-                        link = (row.get("Link para o edital") or "").strip()
-                        objeto = (row.get("Objeto") or "").strip()
-                        if link:
-                            st.markdown(f"- [{titulo}]({link})  \n  _{objeto}_")
-                        else:
-                            st.markdown(f"- {titulo}  \n  _{objeto}_")
-
-        elapsed = time.time() - t0
-        st.success(f"Busca concluída: {len(df)} registro(s) em {elapsed:.1f}s.", icon="✅")
+                elapsed = time.time() - t0
+                st.success(f"Busca concluída: {len(df)} registro(s) em {elapsed:.1f}s.", icon="✅")
 
     except requests.HTTPError as e:
         st.error(f"Falha na busca. Tente novamente em instantes.\n\n{e.__class__.__name__}: {e}", icon="🛑")
