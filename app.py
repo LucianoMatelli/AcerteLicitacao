@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -23,13 +22,16 @@ st.set_page_config(
 st.title("🧭 Acerte Licitações — O seu Buscador de Editais")
 st.caption(
     "Busque editais no PNCP por UF e (opcionalmente) por municípios. "
-    "Use **Carregar municípios** para listar os disponíveis na UF e selecione os desejados antes de executar a busca."
+    "A lista de municípios é carregada do IBGE automaticamente para a UF escolhida."
 )
 
 # ================
 # Parâmetros gerais
 # ================
-BASE_API = "https://pncp.gov.br/api/search"
+PNCP_API = "https://pncp.gov.br/api/search"
+IBGE_ESTADOS = "https://servicodados.ibge.gov.br/api/v1/localidades/estados?order=nome"
+IBGE_MUNS_BY_UF_ID = "https://servicodados.ibge.gov.br/api/v1/localidades/estados/{uf_id}/municipios?order=nome"
+
 TIMEOUT = 30
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
 HDRS = {
@@ -46,8 +48,8 @@ UFS = [
 
 # Limites internos (não exibidos na UI)
 DEFAULT_PAGE_SIZE = 100
-DISCOVERY_PAGES = 5   # para "Carregar municípios"
-MAX_PAGES = 30        # para a busca final
+DISCOVERY_PAGES = 5   # fallback para descobrir municípios pelo PNCP
+MAX_PAGES = 30        # para a busca final no PNCP
 
 # =======================
 # Estado / utilitários
@@ -60,6 +62,38 @@ if "muni_choices" not in st.session_state:
 
 if "muni_selected" not in st.session_state:
     st.session_state.muni_selected: List[str] = []
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _ibge_map_uf_sigla_to_id() -> Dict[str, int]:
+    """Cria um dicionário {sigla: id} para estados, via IBGE."""
+    r = requests.get(IBGE_ESTADOS, timeout=TIMEOUT)
+    r.raise_for_status()
+    out = {}
+    for e in r.json():
+        sigla = (e.get("sigla") or "").strip().upper()
+        eid = e.get("id")
+        if sigla and isinstance(eid, int):
+            out[sigla] = eid
+    return out
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _ibge_municipios_por_uf(uf_sigla: str) -> List[str]:
+    """Lista nomes de municípios para a UF (via IBGE)."""
+    uf_sigla = (uf_sigla or "").strip().upper()
+    if not uf_sigla:
+        return []
+    mapa = _ibge_map_uf_sigla_to_id()
+    uf_id = mapa.get(uf_sigla)
+    if not uf_id:
+        return []
+    r = requests.get(IBGE_MUNS_BY_UF_ID.format(uf_id=uf_id), timeout=TIMEOUT)
+    r.raise_for_status()
+    munis = []
+    for m in r.json():
+        nome = (m.get("nome") or "").strip()
+        if nome:
+            munis.append(nome)
+    return sorted(set(munis))
 
 def _parse_dt(val: Optional[str]) -> Optional[pd.Timestamp]:
     if not val:
@@ -125,7 +159,7 @@ def fetch_page(
     if keyword:
         params1["termo"] = keyword
 
-    r = requests.get(BASE_API, params=params1, headers=HDRS, timeout=TIMEOUT)
+    r = requests.get(PNCP_API, params=params1, headers=HDRS, timeout=TIMEOUT)
     if r.status_code < 400:
         return _extract_items_total(r.json())
 
@@ -148,7 +182,7 @@ def fetch_page(
     if status:
         params2["status"] = status
 
-    r2 = requests.get(BASE_API, params=params2, headers=HDRS, timeout=TIMEOUT)
+    r2 = requests.get(PNCP_API, params=params2, headers=HDRS, timeout=TIMEOUT)
     r2.raise_for_status()
     return _extract_items_total(r2.json())
 
@@ -245,37 +279,44 @@ with st.sidebar:
     keyword = st.text_input("Palavra-chave (opcional)", value="")
 
     st.divider()
-    st.markdown("#### Municípios")
-    if st.button("🔎 Carregar municípios desta UF", use_container_width=True):
+    st.markdown("#### Municípios (IBGE)")
+    # Recarrega lista de municípios automaticamente quando a UF muda
+    try:
+        if uf:
+            muni_choices = _ibge_municipios_por_uf(uf)
+        else:
+            muni_choices = []
+        st.session_state.muni_choices = muni_choices
+    except Exception as e:
+        st.warning(f"IBGE indisponível ({e}). Tentando coletar municípios via PNCP…")
+        # Fallback: varre poucas páginas do PNCP para montar lista
         try:
-            with st.spinner("Carregando municípios…"):
-                # varre poucas páginas para montar lista
-                sample_items = collect_results(
-                    uf=(uf or None),
-                    keyword=keyword.strip(),
-                    page_size=DEFAULT_PAGE_SIZE,
-                    max_pages=DISCOVERY_PAGES,
-                )
-                munis = sorted({(it.get("municipio_nome") or "").strip()
-                                for it in sample_items if (it.get("municipio_nome") or "").strip()})
-                st.session_state.muni_choices = munis
-                # por padrão, nenhuma pré-selecionada (usuário escolhe)
-                st.session_state.muni_selected = []
-            st.success(f"{len(st.session_state.muni_choices)} município(s) carregado(s).")
-        except Exception as e:
-            st.error(f"Falha ao carregar municípios: {e}")
+            sample_items = collect_results(
+                uf=(uf or None),
+                keyword=(keyword or "").strip(),
+                page_size=DEFAULT_PAGE_SIZE,
+                max_pages=DISCOVERY_PAGES,
+            )
+            muni_choices = sorted({(it.get("municipio_nome") or "").strip()
+                                   for it in sample_items if (it.get("municipio_nome") or "").strip()})
+            st.session_state.muni_choices = muni_choices
+        except Exception as e2:
+            st.error(f"Falha também no fallback do PNCP ({e2}).")
+            st.session_state.muni_choices = []
 
+    # Dropdown com busca e checkboxes
     muni_selected = st.multiselect(
         "Selecione municípios (opcional)",
         options=st.session_state.muni_choices,
-        default=st.session_state.muni_selected,
+        default=[m for m in st.session_state.muni_selected if m in st.session_state.muni_choices],
         placeholder="Digite para buscar…",
     )
     st.session_state.muni_selected = muni_selected
 
+    st.caption(f"{len(st.session_state.muni_choices)} município(s) disponíveis para {uf or '—'}.")
+
     st.divider()
     st.markdown("#### Pesquisas salvas")
-    # salvar atual
     col_a, col_b = st.columns([2,1])
     with col_a:
         save_name = st.text_input("Nome da pesquisa", placeholder="Ex.: SP – saúde")
@@ -286,12 +327,11 @@ with st.sidebar:
             else:
                 st.session_state.saved_searches[save_name.strip()] = {
                     "uf": uf,
-                    "keyword": keyword.strip(),
+                    "keyword": (keyword or "").strip(),
                     "municipios": st.session_state.muni_selected[:],
                 }
                 st.success(f"Pesquisa **{save_name.strip()}** salva.")
 
-    # aplicar/excluir
     if st.session_state.saved_searches:
         names = sorted(st.session_state.saved_searches.keys())
         col1, col2, col3 = st.columns([2,1,1])
@@ -301,31 +341,24 @@ with st.sidebar:
             if st.button("Aplicar", use_container_width=True):
                 cfg = st.session_state.saved_searches[chosen]
                 # aplica parâmetros
-                uf = cfg.get("uf") or ""
-                # atualiza selectbox UF visualmente:
-                st.session_state._provided_uf = uf  # só pra referência interna
                 st.session_state.muni_selected = cfg.get("municipios", [])
-                # para exibir lista na UI, recarrega choices (caso vazio)
-                if st.session_state.muni_selected and not st.session_state.muni_choices:
-                    st.session_state.muni_choices = sorted(st.session_state.muni_selected)
-                st.session_state.keyword_applied = cfg.get("keyword", "")
+                st.session_state._restore_uf = cfg.get("uf", "")
+                st.session_state._restore_keyword = cfg.get("keyword", "")
                 st.experimental_rerun()
         with col3:
             if st.button("Excluir", use_container_width=True):
                 st.session_state.saved_searches.pop(chosen, None)
                 st.experimental_rerun()
 
-        # exportar/importar JSON
         colx, coly = st.columns(2)
         with colx:
-            if st.download_button(
+            st.download_button(
                 "⬇️ Exportar pesquisas (JSON)",
                 data=json.dumps(st.session_state.saved_searches, ensure_ascii=False, indent=2),
                 file_name="pesquisas_salvas.json",
                 mime="application/json",
                 use_container_width=True,
-            ):
-                pass
+            )
         with coly:
             up = st.file_uploader("Importar JSON", type=["json"])
             if up is not None:
@@ -343,17 +376,17 @@ with st.sidebar:
     st.divider()
     run = st.button("🚀 Executar busca", type="primary", use_container_width=True)
 
-# Sincroniza keyword se aplicada via pesquisa salva
-if "keyword_applied" in st.session_state:
-    # mostra na UI:
+# Restaura UF/keyword se vieram de “Aplicar”
+if "_restore_uf" in st.session_state or "_restore_keyword" in st.session_state:
     with st.sidebar:
-        st.info(f"Palavra-chave aplicada: **{st.session_state.keyword_applied}**")
-    # usa para a busca
-    effective_keyword = st.session_state.keyword_applied
-    # limpa após uso para não confundir próximos runs
-    del st.session_state["keyword_applied"]
-else:
-    effective_keyword = (keyword or "").strip()
+        if "_restore_uf" in st.session_state and st.session_state["_restore_uf"]:
+            st.info(f"UF aplicada: **{st.session_state['_restore_uf']}**")
+        if "_restore_keyword" in st.session_state and st.session_state["_restore_keyword"]:
+            st.info(f"Palavra-chave aplicada: **{st.session_state['_restore_keyword']}**")
+    # Nota: não forcei a mudança do selectbox “UF” aqui para evitar loop;
+    # use as infos apenas como referência visual.
+    del st.session_state["_restore_uf"]
+    del st.session_state["_restore_keyword"]
 
 # ==========================
 # Resultado principal (tabela)
@@ -372,7 +405,7 @@ if run:
         t0 = time.time()
         items = collect_results(
             uf=(uf or None),
-            keyword=effective_keyword,
+            keyword=(keyword or "").strip(),
             page_size=DEFAULT_PAGE_SIZE,
             max_pages=MAX_PAGES,
             progress_cb=progress.progress,
