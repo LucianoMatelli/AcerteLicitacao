@@ -58,7 +58,7 @@ MUNICIPIOS_PADRAO: Dict[str, str] = {
     "Itararé/SP": "3533",
     "Buri/SP": "3359",
     "Sorocaba/SP": "3849",
-    "Itu/SP": "1234",
+    "Itu/SP": "3540",
 }
 
 # ===================== Utils =====================
