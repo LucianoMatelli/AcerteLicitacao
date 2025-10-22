@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import io
-import math
+import json
+import os
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -19,11 +20,10 @@ st.set_page_config(
     page_icon="🧭",
     layout="wide",
 )
-
 st.title("🧭 Acerte Licitações — O seu Buscador de Editais")
 st.caption(
-    "Busque editais no PNCP por UF e palavra-chave. A lista abaixo mostra os resultados consolidados; "
-    "os links já apontam para a página correta de **Editais**."
+    "Busque editais no PNCP por UF e (opcionalmente) por municípios. "
+    "Use **Carregar municípios** para listar os disponíveis na UF e selecione os desejados antes de executar a busca."
 )
 
 # ================
@@ -44,32 +44,42 @@ UFS = [
     "RJ", "RN", "RO", "RR", "RS", "SC", "SE", "SP", "TO",
 ]
 
+# Limites internos (não exibidos na UI)
+DEFAULT_PAGE_SIZE = 100
+DISCOVERY_PAGES = 5   # para "Carregar municípios"
+MAX_PAGES = 30        # para a busca final
+
 # =======================
-# Utilitários de formatação
+# Estado / utilitários
 # =======================
+if "saved_searches" not in st.session_state:
+    st.session_state.saved_searches: Dict[str, Dict] = {}
+
+if "muni_choices" not in st.session_state:
+    st.session_state.muni_choices: List[str] = []
+
+if "muni_selected" not in st.session_state:
+    st.session_state.muni_selected: List[str] = []
+
 def _parse_dt(val: Optional[str]) -> Optional[pd.Timestamp]:
     if not val:
         return None
     try:
-        # Tenta ISO
         return pd.to_datetime(val, utc=False, errors="coerce")
     except Exception:
         return None
 
 def _fmt_br(dt: Optional[pd.Timestamp]) -> str:
     if isinstance(dt, pd.Timestamp) and not pd.isna(dt):
-        # Se tiver hora, mostra com hora; senão, só a data
         if dt.hour or dt.minute or dt.second:
             return dt.strftime("%d/%m/%Y %H:%M")
         return dt.strftime("%d/%m/%Y")
     return ""
 
 def _extract_items_total(js: dict) -> Tuple[List[dict], int]:
-    """Extrai (items, total) de diversos formatos que o PNCP usa."""
     if not isinstance(js, dict):
         return [], 0
 
-    # Onde costuma vir a lista
     items = []
     for items_key in ("items", "results", "licitacoes", "documentos", "conteudo", "data"):
         if isinstance(js.get(items_key), list):
@@ -80,7 +90,6 @@ def _extract_items_total(js: dict) -> Tuple[List[dict], int]:
         if isinstance(data, dict) and isinstance(data.get("items"), list):
             items = data["items"]
 
-    # Onde costuma vir o total
     total = 0
     for total_key in ("total", "total_results", "totalItems", "count"):
         if isinstance(js.get(total_key), int):
@@ -98,16 +107,11 @@ def _extract_items_total(js: dict) -> Tuple[List[dict], int]:
 def fetch_page(
     uf: Optional[str],
     page: int,
-    page_size: int = 100,
+    page_size: int = DEFAULT_PAGE_SIZE,
     keyword: str = "",
     status: str = "recebendo_proposta",
 ) -> Tuple[List[Dict], int]:
-    """
-    1) Tenta a API 'clássica' (mais estável): tipos_documento=edital, ordenacao=-data.
-    2) Se vier 400/422, cai para 'catalog2': index=catalog2&doc_type=_doc&document_type=edital&ordenacao=-data_publicacao_pncp.
-    Retorna (items, total).
-    """
-    # --- tentativa 1: clássica ---
+    # 1) API “clássica”
     params1 = {
         "tipos_documento": "edital",
         "pagina": page,
@@ -128,7 +132,7 @@ def fetch_page(
     if r.status_code not in (400, 422):
         r.raise_for_status()
 
-    # --- tentativa 2: catalog2 ---
+    # 2) Fallback “catalog2”
     params2 = {
         "index": "catalog2",
         "doc_type": "_doc",
@@ -151,11 +155,10 @@ def fetch_page(
 def collect_results(
     uf: Optional[str],
     keyword: str = "",
-    page_size: int = 100,
-    max_pages: int = 30,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    max_pages: int = MAX_PAGES,
     progress_cb=None,
 ) -> List[Dict]:
-    """Varre paginação usando fetch_page com fallback automático."""
     all_items: List[Dict] = []
     page = 1
     total_known = None
@@ -169,54 +172,32 @@ def collect_results(
             break
 
         all_items.extend(items)
-
         if progress_cb and total:
             progress_cb(min(len(all_items) / total, 0.99))
 
-        # Se já pegou tudo, para
         if total and len(all_items) >= total:
             break
-
         page += 1
 
     if progress_cb:
         progress_cb(1.0)
-
     return all_items
 
 def _build_link(item: dict) -> str:
-    """
-    Gera link final para /app/editais/{cnpj}/{ano}/{seq}
-    - Se vier item_url começando com /compras/... converte para /app/editais/...
-    - Senão, tenta montar pelos campos cnpj/ano/numero_sequencial
-    """
-    # 1) Usa item_url se existir
     url = (item.get("item_url") or "").strip()
     if url:
-        # exemplos de entrada:
-        #   /compras/46634259000195/2025/201
-        #   /editais/46634259000195/2025/201
         parts = url.strip("/").split("/")
-        # parts esperados: ["compras"|"editais", "{cnpj}", "{ano}", "{seq}"]
         if len(parts) >= 4:
             cnpj, ano, seq = parts[-3], parts[-2], parts[-1]
             return f"https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}"
-
-    # 2) Monta pelos campos soltos
     cnpj = str(item.get("orgao_cnpj") or "").strip()
     ano = str(item.get("ano") or "").strip()
     seq = str(item.get("numero_sequencial") or "").strip()
     if len(cnpj) == 14 and len(ano) == 4 and seq:
         return f"https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}"
-
-    # 3) Se não deu, retorna vazio
     return ""
 
 def normalize_item(item: dict) -> dict:
-    """
-    Normaliza campos para o DataFrame final.
-    Tenta múltiplos nomes de campos para cobrir variações da API.
-    """
     title = item.get("title") or item.get("titulo") or ""
     description = item.get("description") or item.get("descricao") or ""
     document_type = item.get("document_type") or item.get("tipo_documento") or ""
@@ -252,7 +233,6 @@ def normalize_item(item: dict) -> dict:
         "Publicação": _fmt_br(dt_pub),
         "Fim do envio de proposta": _fmt_br(dt_fim),
         "Tipo (nome)": tipo_nome,
-        # Úteis para debug/investigação (não exibidos por padrão)
         "_raw_item_url": item.get("item_url", ""),
     }
 
@@ -261,11 +241,119 @@ def normalize_item(item: dict) -> dict:
 # ==================
 with st.sidebar:
     st.subheader("Parâmetros da busca")
-    uf = st.selectbox("UF (opcional)", UFS, index=UFS.index("SP"))
+    uf = st.selectbox("UF", UFS, index=UFS.index("SP"))
     keyword = st.text_input("Palavra-chave (opcional)", value="")
-    page_size = 100  # fixado (conforme pedido)
-    max_pages = st.slider("Páginas a varrer (limite de segurança)", 1, 50, 10)
-    run = st.button("Executar busca", type="primary", use_container_width=True)
+
+    st.divider()
+    st.markdown("#### Municípios")
+    if st.button("🔎 Carregar municípios desta UF", use_container_width=True):
+        try:
+            with st.spinner("Carregando municípios…"):
+                # varre poucas páginas para montar lista
+                sample_items = collect_results(
+                    uf=(uf or None),
+                    keyword=keyword.strip(),
+                    page_size=DEFAULT_PAGE_SIZE,
+                    max_pages=DISCOVERY_PAGES,
+                )
+                munis = sorted({(it.get("municipio_nome") or "").strip()
+                                for it in sample_items if (it.get("municipio_nome") or "").strip()})
+                st.session_state.muni_choices = munis
+                # por padrão, nenhuma pré-selecionada (usuário escolhe)
+                st.session_state.muni_selected = []
+            st.success(f"{len(st.session_state.muni_choices)} município(s) carregado(s).")
+        except Exception as e:
+            st.error(f"Falha ao carregar municípios: {e}")
+
+    muni_selected = st.multiselect(
+        "Selecione municípios (opcional)",
+        options=st.session_state.muni_choices,
+        default=st.session_state.muni_selected,
+        placeholder="Digite para buscar…",
+    )
+    st.session_state.muni_selected = muni_selected
+
+    st.divider()
+    st.markdown("#### Pesquisas salvas")
+    # salvar atual
+    col_a, col_b = st.columns([2,1])
+    with col_a:
+        save_name = st.text_input("Nome da pesquisa", placeholder="Ex.: SP – saúde")
+    with col_b:
+        if st.button("💾 Salvar", use_container_width=True, type="primary"):
+            if not save_name.strip():
+                st.warning("Informe um nome para a pesquisa.")
+            else:
+                st.session_state.saved_searches[save_name.strip()] = {
+                    "uf": uf,
+                    "keyword": keyword.strip(),
+                    "municipios": st.session_state.muni_selected[:],
+                }
+                st.success(f"Pesquisa **{save_name.strip()}** salva.")
+
+    # aplicar/excluir
+    if st.session_state.saved_searches:
+        names = sorted(st.session_state.saved_searches.keys())
+        col1, col2, col3 = st.columns([2,1,1])
+        with col1:
+            chosen = st.selectbox("Minhas pesquisas", names)
+        with col2:
+            if st.button("Aplicar", use_container_width=True):
+                cfg = st.session_state.saved_searches[chosen]
+                # aplica parâmetros
+                uf = cfg.get("uf") or ""
+                # atualiza selectbox UF visualmente:
+                st.session_state._provided_uf = uf  # só pra referência interna
+                st.session_state.muni_selected = cfg.get("municipios", [])
+                # para exibir lista na UI, recarrega choices (caso vazio)
+                if st.session_state.muni_selected and not st.session_state.muni_choices:
+                    st.session_state.muni_choices = sorted(st.session_state.muni_selected)
+                st.session_state.keyword_applied = cfg.get("keyword", "")
+                st.experimental_rerun()
+        with col3:
+            if st.button("Excluir", use_container_width=True):
+                st.session_state.saved_searches.pop(chosen, None)
+                st.experimental_rerun()
+
+        # exportar/importar JSON
+        colx, coly = st.columns(2)
+        with colx:
+            if st.download_button(
+                "⬇️ Exportar pesquisas (JSON)",
+                data=json.dumps(st.session_state.saved_searches, ensure_ascii=False, indent=2),
+                file_name="pesquisas_salvas.json",
+                mime="application/json",
+                use_container_width=True,
+            ):
+                pass
+        with coly:
+            up = st.file_uploader("Importar JSON", type=["json"])
+            if up is not None:
+                try:
+                    data = json.load(up)
+                    if isinstance(data, dict):
+                        st.session_state.saved_searches.update(data)
+                        st.success("Pesquisas importadas.")
+                        st.experimental_rerun()
+                    else:
+                        st.error("Arquivo inválido.")
+                except Exception as e:
+                    st.error(f"Falha ao importar: {e}")
+
+    st.divider()
+    run = st.button("🚀 Executar busca", type="primary", use_container_width=True)
+
+# Sincroniza keyword se aplicada via pesquisa salva
+if "keyword_applied" in st.session_state:
+    # mostra na UI:
+    with st.sidebar:
+        st.info(f"Palavra-chave aplicada: **{st.session_state.keyword_applied}**")
+    # usa para a busca
+    effective_keyword = st.session_state.keyword_applied
+    # limpa após uso para não confundir próximos runs
+    del st.session_state["keyword_applied"]
+else:
+    effective_keyword = (keyword or "").strip()
 
 # ==========================
 # Resultado principal (tabela)
@@ -282,53 +370,42 @@ if run:
 
     try:
         t0 = time.time()
-        # coleta com progresso
         items = collect_results(
             uf=(uf or None),
-            keyword=keyword.strip(),
-            page_size=page_size,
-            max_pages=max_pages,
+            keyword=effective_keyword,
+            page_size=DEFAULT_PAGE_SIZE,
+            max_pages=MAX_PAGES,
             progress_cb=progress.progress,
         )
+        rows = [normalize_item(it) for it in items]
+        df = pd.DataFrame(rows)
 
-        norm_rows = [normalize_item(it) for it in items]
-        df = pd.DataFrame(norm_rows)
+        # filtro por municípios, se selecionados
+        muni_selected = st.session_state.muni_selected or []
+        if muni_selected:
+            df = df[df["Cidade"].isin(set(muni_selected))].reset_index(drop=True)
 
-        # Filtra apenas colunas de exibição
+        # colunas finais (exibição)
         display_cols = [
-            "Cidade",
-            "UF",
-            "Título",
-            "Objeto",
-            "Link para o edital",
-            "Tipo",
-            "Orgão",
-            "Unidade",
-            "Esfera",
-            "Modalidade",
-            "Publicação",
-            "Fim do envio de proposta",
-            "Tipo (nome)",
+            "Cidade", "UF", "Título", "Objeto", "Link para o edital",
+            "Tipo", "Orgão", "Unidade", "Esfera", "Modalidade",
+            "Publicação", "Fim do envio de proposta", "Tipo (nome)",
         ]
         for c in display_cols:
             if c not in df.columns:
                 df[c] = ""
         df = df[display_cols]
 
-        # Mostra a tabela primeiro (como solicitado)
+        # Tabela primeiro
         with result_placeholder:
             st.subheader("Resultados")
-            st.dataframe(
-                df,
-                use_container_width=True,
-                hide_index=True,
-            )
+            st.dataframe(df, use_container_width=True, hide_index=True)
 
-        # Download XLSX (apenas)
+        # Download XLSX
         if not df.empty:
             buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="PNCP")
+            with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+                df.to_excel(xw, index=False, sheet_name="PNCP")
             buf.seek(0)
             with download_placeholder:
                 st.download_button(
@@ -342,12 +419,9 @@ if run:
 
         elapsed = time.time() - t0
         with summary_placeholder:
-            st.success(
-                f"Busca concluída: {len(df)} registro(s) em {elapsed:.1f}s.",
-                icon="✅",
-            )
+            st.success(f"Busca concluída: {len(df)} registro(s) em {elapsed:.1f}s.", icon="✅")
 
-        # Lista por cidade (abaixo da tabela, como combinado)
+        # Lista por cidade (abaixo)
         with details_placeholder:
             if not df.empty:
                 st.markdown("### Editais por cidade (lista)")
@@ -367,19 +441,8 @@ if run:
         st.toast("Concluído!", icon="🎉")
 
     except requests.HTTPError as e:
-        status.update(
-            label="Falha na busca. Tente novamente em instantes.",
-            state="error",
-            expanded=True,
-        )
-        st.error(
-            f"Falha na busca. Tente novamente em instantes.\n\n{e.__class__.__name__}: {e}",
-            icon="🛑",
-        )
+        status.update(label="Falha na busca. Tente novamente em instantes.", state="error", expanded=True)
+        st.error(f"Falha na busca. Tente novamente em instantes.\n\n{e.__class__.__name__}: {e}", icon="🛑")
     except Exception as e:
-        status.update(
-            label="Ocorreu um erro inesperado.",
-            state="error",
-            expanded=True,
-        )
+        status.update(label="Ocorreu um erro inesperado.", state="error", expanded=True)
         st.exception(e)
