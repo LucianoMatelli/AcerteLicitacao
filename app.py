@@ -1,271 +1,350 @@
-# app.py
+# app.py — 📑 Acerte Licitações — O seu Buscador de Editais
+# Requisitos: streamlit, requests, pandas, openpyxl/xlsxwriter
+# Execução:  streamlit run app.py
+
 from __future__ import annotations
 import io
+import math
 import time
-import unicodedata
-from typing import List, Dict, Tuple, Optional
+from datetime import date, timedelta
+from typing import Dict, List, Optional
 
-import requests
 import pandas as pd
+import requests
 import streamlit as st
 
-# ===================== Config de página =====================
+
+# =========================
+# Config & Constantes
+# =========================
 st.set_page_config(
     page_title="📑 Acerte Licitações — O seu Buscador de Editais",
     page_icon="📑",
     layout="wide",
 )
-st.markdown("### 📑 Acerte Licitações — O seu Buscador de Editais")
-st.caption("Busca oficial no PNCP por município (com enriquecimento do Objeto).")
 
-# ===================== Constantes =====================
-PNCP_API = "https://pncp.gov.br/api/search"
-HDRS = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept-Language": "pt-BR,pt;q=0.9",
-    "Referer": "https://pncp.gov.br/app/editais",
-}
-TIMEOUT = 30
-PAGE_SIZE = 100        # tamanho aprovado
-MAX_PAGES = 6          # segurança
+BASE = "https://pncp.gov.br/api/consulta"
+ENDP_PROPOSTA = f"{BASE}/v1/contratacoes/proposta"       # requer dataFinal
+ENDP_PUBLICACAO = f"{BASE}/v1/contratacoes/publicacao"   # requer dataInicial e dataFinal
 
-STATUS_OPTIONS = [
-    ("recebendo_proposta", "Recebendo proposta"),
-    ("divulgado", "Divulgado"),
-    ("em_andamento", "Em andamento"),
-    ("concluido", "Concluído"),
-]
+UFS = ["AC","AL","AM","AP","BA","CE","DF","ES","GO","MA","MG","MS","MT",
+       "PA","PB","PE","PI","PR","RJ","RN","RO","RR","RS","SC","SE","SP","TO"]
 
-# ===================== Lista aprovada de municípios (nome -> id PNCP) =====================
-# (Se quiser ampliar depois, basta adicionar aqui.)
-MUNICIPIOS_PADRAO: Dict[str, str] = {
-    "Porto Feliz/SP": "3721",
-    "Conchas/SP": "3405",
-    "Torre de Pedra/SP": "3878",
-    "Porangaba/SP": "3720",
-    "Guareí/SP": "3477",
-    "Quadra/SP": "3735",
-    "Angatuba/SP": "3292",
-    "Capão Bonito/SP": "3385",
-    "Campina do Monte Alegre/SP": "3375",
-    "Pilar do Sul/SP": "3694",
-    "Sarapuí/SP": "3838",
-    # "Alambari/SP": "",  # sem código → omitido
-    "Capela do Alto/SP": "3386",
-    "Itapetininga/SP": "3523",
-    "São Miguel Arcanjo/SP": "3829",
-    "Cesário Lange/SP": "3399",
-    "Itararé/SP": "3533",
-    "Buri/SP": "3359",
-    "Sorocaba/SP": "3849",
-    "Itu/SP": "3540",
+STATUS_OPCOES = {
+    "Recebendo propostas (janela aberta)": "proposta",
+    "Publicadas (últimos 30 dias)": "publicacao",
 }
 
-# ===================== Utils =====================
-def _extract_items_total(js: dict) -> Tuple[List[dict], Optional[int]]:
-    total = js.get("total") or js.get("count") or (js.get("meta") or {}).get("total")
-    for k in ("items", "results", "conteudo", "licitacoes", "data", "documents", "documentos"):
-        v = js.get(k)
-        if isinstance(v, list):
-            return v, total
-    return [], total
+PAGE_SIZE = 50  # limite máximo da API para consulta (conforme swagger)
 
-def _build_editais_link(orgao_cnpj: str, ano: str, numero_sequencial: str) -> str:
-    cnpj = "".join(c for c in str(orgao_cnpj or "") if c.isdigit())
-    ano = str(ano or "").strip()
-    seq = str(numero_sequencial or "").strip()
-    if len(cnpj) == 14 and ano and seq:
-        return f"https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}"
-    return ""
 
-# ===================== Coleta principal (versão validada) =====================
-def fetch_by_municipio_id(muni_id: str, status_ui: str, keyword: str) -> List[dict]:
+# =========================
+# Utils
+# =========================
+def _normalize_text(s: Optional[str]) -> str:
+    return (s or "").strip()
+
+
+def _xlsx_bytes(df: pd.DataFrame, sheet_name: str = "resultados") -> bytes:
+    with io.BytesIO() as buffer:
+        with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+        return buffer.getvalue()
+
+
+# =========================
+# Data Access (API PNCP)
+# =========================
+@st.cache_data(show_spinner=False, ttl=60 * 60)
+def listar_municipios_por_uf(uf: str, data_final_iso: str) -> List[Dict]:
     """
-    Caminho principal validado: /api/search?tipos_documento=edital&municipios=<id>
+    Deriva os municípios a partir dos editais da UF no endpoint 'proposta'.
+    Saída: lista única [{municipio, uf, codigo_ibge}].
     """
-    out: List[dict] = []
-    page = 1
-    while page <= MAX_PAGES:
+    pagina = 1
+    vistos: Dict[str, Dict] = {}
+    total_paginas_detectado = None
+
+    while True:
         params = {
-            "tipos_documento": "edital",
-            "ordenacao": "-data",          # validado
-            "pagina": page,
-            "tam_pagina": PAGE_SIZE,
-            "municipios": muni_id,
-            "status": status_ui,
+            "uf": uf,
+            "dataFinal": data_final_iso,
+            "pagina": pagina,
+            "tamanhoPagina": PAGE_SIZE,
         }
-        if keyword:
-            params["termo"] = keyword
+        r = requests.get(ENDP_PROPOSTA, params=params, timeout=60)
+        r.raise_for_status()
+        payload = r.json()
 
-        r = requests.get(PNCP_API, params=params, headers=HDRS, timeout=TIMEOUT)
-        if r.status_code >= 400:
+        itens = payload.get("data") or []
+        if not itens:
             break
-        items, total = _extract_items_total(r.json())
-        if not items:
+
+        for it in itens:
+            uo = (it.get("unidadeOrgao") or {})
+            nome = uo.get("municipioNome")
+            ibge = uo.get("codigoIbge")
+            sigla = uo.get("ufSigla") or uf
+            if nome and ibge:
+                vistos.setdefault(str(ibge), {"municipio": nome, "uf": sigla, "codigo_ibge": str(ibge)})
+
+        # paginação
+        numero = payload.get("numeroPagina") or pagina
+        total_paginas_detectado = payload.get("totalPaginas")
+        if total_paginas_detectado and numero >= total_paginas_detectado:
             break
-        out.extend(items)
-        if total and len(out) >= total:
-            break
-        page += 1
+        pagina += 1
+
+        # cortesia: breve respiro para não sobrecarregar
+        time.sleep(0.1)
+
+    out = list(vistos.values())
+    out.sort(key=lambda x: (x["uf"], x["municipio"]))
     return out
 
-def enrich_from_catalog2(orgao_cnpj: str, ano: str, numero_sequencial: str, uf_hint: Optional[str] = None) -> dict:
+
+def _iterar_paginas(endpoint: str, params_base: Dict[str, str], progresso: Optional[st.progress] = None):
     """
-    Enriquecimento para pegar 'description' (Objeto) e campos extras do catalog2.
-    Faz uma busca curta e confere CNPJ/Ano/Seq.
+    Itera páginas de um endpoint (/proposta ou /publicacao), rendendo cada 'data' parcial.
+    Atualiza progress bar se fornecida (estimativa com base em totalPaginas quando disponível).
     """
-    termo = f"{orgao_cnpj} {ano} {numero_sequencial}"
-    params = {
-        "index": "catalog2",
-        "doc_type": "_doc",
-        "document_type": "edital",
-        "pagina": 1,
-        "tam_pagina": 10,
-        "ordenacao": "-data_publicacao_pncp",
-        "termo": termo,
-    }
-    if uf_hint:
-        params["uf"] = uf_hint
-    try:
-        r = requests.get(PNCP_API, params=params, headers=HDRS, timeout=TIMEOUT)
-        if r.status_code >= 400:
-            return {}
-        items, _ = _extract_items_total(r.json())
-        if not items:
-            return {}
-        cnpj_d = "".join(c for c in str(orgao_cnpj or "") if c.isdigit())
-        ano_d = str(ano or "").strip()
-        seq_d = str(numero_sequencial or "").strip()
-        for it in items:
-            if (
-                "".join(c for c in str(it.get("orgao_cnpj") or "") if c.isdigit()) == cnpj_d
-                and str(it.get("ano") or "").strip() == ano_d
-                and str(it.get("numero_sequencial") or "").strip() == seq_d
-            ):
-                return it
-        return items[0]
-    except Exception:
-        return {}
+    pagina = 1
+    total_pag = None
 
-def normalize_items(items: List[dict]) -> pd.DataFrame:
-    rows = []
-    for it in items:
-        orgao_cnpj = it.get("orgao_cnpj") or ""
-        ano = it.get("ano") or ""
-        seq = it.get("numero_sequencial") or ""
-        uf_hint = it.get("uf") or None
-        rich = enrich_from_catalog2(orgao_cnpj, ano, seq, uf_hint=uf_hint)
+    while True:
+        params = dict(params_base)
+        params.update({"pagina": pagina, "tamanhoPagina": PAGE_SIZE})
+        r = requests.get(endpoint, params=params, timeout=60)
+        r.raise_for_status()
+        payload = r.json()
 
-        rows.append({
-            "Cidade": it.get("municipio_nome") or rich.get("municipio_nome") or "",
-            "UF": it.get("uf") or rich.get("uf") or "",
-            "Título": it.get("title") or it.get("titulo") or "",
-            "Objeto": rich.get("description") or it.get("description") or "",
-            "Link para o edital": _build_editais_link(orgao_cnpj, ano, seq),
-            "Tipo": it.get("document_type") or rich.get("document_type") or "edital",
-            "Orgão": it.get("orgao_nome") or rich.get("orgao_nome") or "",
-            "Unidade": it.get("unidade_nome") or rich.get("unidade_nome") or "",
-            "Esfera": it.get("esfera_nome") or rich.get("esfera_nome") or "",
-            "Modalidade": it.get("modalidade_licitacao_nome") or rich.get("modalidade_licitacao_nome") or "",
-            "Publicação": it.get("data_publicacao_pncp") or rich.get("data_publicacao_pncp") or "",
-            "Fim do envio de proposta": it.get("data_fim_vigencia") or rich.get("data_fim_vigencia") or "",
-            "Tipo (PNCP)": it.get("tipo_nome") or rich.get("tipo_nome") or "",
-        })
+        # metadados
+        total_pag = total_pag or payload.get("totalPaginas")
+        dados = payload.get("data") or []
+        if not dados:
+            break
 
-    df = pd.DataFrame(rows)
-    if not df.empty and "Publicação" in df.columns:
-        df["__pub__"] = pd.to_datetime(df["Publicação"], errors="coerce")
-        df = df.sort_values("__pub__", ascending=False, na_position="last").drop(columns="__pub__", errors="ignore")
+        yield pagina, total_pag, dados
+
+        # progress bar
+        if progresso is not None and total_pag:
+            progresso.progress(min(1.0, pagina / float(total_pag)))
+
+        numero = payload.get("numeroPagina") or pagina
+        if total_pag and numero >= total_pag:
+            break
+        pagina += 1
+        time.sleep(0.05)
+
+
+def consultar_editais(
+    palavra_chave: str,
+    uf: str,
+    codigos_ibge: List[str],
+    status_api: str,
+) -> pd.DataFrame:
+    """
+    Consulta editais conforme filtros. Para 'proposta', usa dataFinal=hoje.
+    Para 'publicacao', usa janela [hoje-30, hoje].
+    Filtro por município é aplicado client-side (subset) — simples e robusto.
+    """
+    hoje = date.today()
+    params_base = {"uf": uf}
+
+    if status_api == "proposta":
+        endpoint = ENDP_PROPOSTA
+        params_base["dataFinal"] = hoje.isoformat()
+    else:
+        endpoint = ENDP_PUBLICACAO
+        params_base["dataInicial"] = (hoje - timedelta(days=30)).isoformat()
+        params_base["dataFinal"] = hoje.isoformat()
+
+    if palavra_chave:
+        # A API de consulta não expõe 'q' textual explícito no swagger;
+        # muitas implantações usam 'objetoCompra' client-side. Aqui aplicamos filtro pós-busca (robusto).
+        palavra_chave = palavra_chave.strip().lower()
+
+    barra = st.progress(0.0)
+    acumulado = []
+
+    for pagina, total_pag, dados in _iterar_paginas(endpoint, params_base, progresso=barra):
+        # filtro client-side por municípios
+        if codigos_ibge:
+            ibge_set = set(str(x) for x in codigos_ibge)
+            dados = [d for d in dados if ((d.get("unidadeOrgao") or {}).get("codigoIbge") in ibge_set)]
+
+        # filtro client-side por palavra-chave no objeto/descrição
+        if palavra_chave:
+            def _tem_palavra(d):
+                alvo = " ".join([
+                    _normalize_text(d.get("objetoCompra")),
+                    _normalize_text(d.get("informacaoComplementar")),
+                    _normalize_text((d.get("unidadeOrgao") or {}).get("nomeUnidade")),
+                ]).lower()
+                return palavra_chave in alvo
+            dados = [d for d in dados if _tem_palavra(d)]
+
+        acumulado.extend(dados)
+
+        # ajuste progressivo quando total_pag é desconhecido
+        if total_pag is None:
+            # heurística simples
+            barra.progress(min(1.0, min(0.9, pagina * 0.1)))
+
+    barra.progress(1.0)
+
+    # Normalização de campos-chave
+    linhas = []
+    for d in acumulado:
+        uo = d.get("unidadeOrgao") or {}
+        linha = {
+            "UF": uo.get("ufSigla"),
+            "Município": uo.get("municipioNome"),
+            "IBGE": uo.get("codigoIbge"),
+            "Órgão/Unidade": uo.get("nomeUnidade"),
+            "Modalidade": d.get("modalidadeNome"),
+            "Modo de Disputa": d.get("modoDisputaNome"),
+            "Nº Compra": d.get("numeroCompra"),
+            "Objeto": d.get("objetoCompra"),
+            "Informação Complementar": d.get("informacaoComplementar"),
+            "Publicação PNCP": d.get("dataPublicacaoPncp"),
+            "Abertura Proposta": d.get("dataAberturaProposta"),
+            "Encerramento Proposta": d.get("dataEncerramentoProposta"),
+            "Situação": d.get("situacaoCompraNome"),
+            "Link Origem": d.get("linkSistemaOrigem"),
+            "Controle PNCP": d.get("numeroControlePNCP"),
+        }
+        linhas.append(linha)
+
+    df = pd.DataFrame(linhas)
+    # Ordena por data de publicação (quando disponível) desc, depois município
+    if "Publicação PNCP" in df.columns:
+        df = df.sort_values(by=["Publicação PNCP", "Município"], ascending=[False, True])
     return df
 
-# ===================== Sidebar (seleção de municípios da lista aprovada) =====================
-with st.sidebar:
-    st.subheader("Parâmetros")
 
-    st.markdown("**Municípios disponíveis** (lista aprovada):")
-    munis_nomes = list(MUNICIPIOS_PADRAO.keys())
+# =========================
+# Sidebar — Filtros & Pesquisas Salvas
+# =========================
+st.sidebar.header("Filtros")
 
-    select_all = st.checkbox("Selecionar todos", value=False)
-    if select_all:
-        selected_munis = st.multiselect(
-            "Selecione municípios",
-            options=munis_nomes,
-            default=munis_nomes,
-            placeholder="Digite para filtrar…",
-            label_visibility="collapsed",
-        )
+# Palavra-chave
+palavra_chave = st.sidebar.text_input("Palavra chave", value="")
+
+# Estado (obrigatório)
+uf_escolhida = st.sidebar.selectbox("Estado", options=UFS, index=UFS.index("SP"))
+if not uf_escolhida:
+    st.sidebar.error("Selecione um Estado (UF).")
+
+# Municípios (derivados da UF via endpoint 'proposta')
+# Carrega/atualiza automaticamente ao trocar a UF (com cache de 1h)
+data_final_ref = date.today().isoformat()  # referência para derivar municípios
+try:
+    municipios_derivados = listar_municipios_por_uf(uf_escolhida, data_final_ref)
+except Exception as e:
+    st.sidebar.warning(f"Não foi possível derivar municípios para {uf_escolhida}: {e}")
+    municipios_derivados = []
+
+label_to_ibge = {f"{m['municipio']} / {m['uf']}": m["codigo_ibge"] for m in municipios_derivados}
+municipios_selecionados_labels = st.sidebar.multiselect(
+    "Municípios",
+    options=list(label_to_ibge.keys()),
+    default=[],
+    help="Lista derivada dos editais com propostas abertas hoje para a UF selecionada.",
+)
+codigos_ibge_escolhidos = [label_to_ibge[l] for l in municipios_selecionados_labels]
+
+# Status
+status_label = st.sidebar.selectbox("Status", options=list(STATUS_OPCOES.keys()), index=0)
+status_api = STATUS_OPCOES[status_label]
+
+st.sidebar.markdown("---")
+
+# Salvar pesquisa
+if "pesquisas_salvas" not in st.session_state:
+    st.session_state["pesquisas_salvas"] = {}  # nome -> dict params
+
+nome_pesquisa = st.sidebar.text_input("Salvar pesquisa", value="", placeholder="Ex.: SP Educação — propostas")
+if st.sidebar.button("Salvar pesquisa"):
+    if not uf_escolhida:
+        st.sidebar.error("Para salvar, selecione um Estado (UF).")
     else:
-        selected_munis = st.multiselect(
-            "Selecione municípios",
-            options=munis_nomes,
-            default=[],
-            placeholder="Digite para filtrar…",
-            label_visibility="collapsed",
-        )
-
-    keyword = st.text_input("Palavra-chave (opcional)", value="")
-
-    status_map = {label: key for key, label in STATUS_OPTIONS}
-    status_label = st.selectbox("Status no PNCP", options=[l for _, l in STATUS_OPTIONS], index=0)
-    status_ui = status_map[status_label]
-
-    run_btn = st.button("🔎 Executar busca", use_container_width=True, type="primary")
-
-# espaço da TABELA (no topo)
-tbl_placeholder = st.empty()
-st.divider()
-
-# Barra de progresso (exibe município atual — como a versão aprovada)
-progress_bar = st.progress(0, text="Aguardando…")
-
-# ===================== Execução =====================
-if run_btn:
-    if not selected_munis:
-        st.warning("Selecione ao menos um município.", icon="⚠️")
-    else:
-        all_items: List[dict] = []
-        total = len(selected_munis)
-        t0 = time.time()
-
-        for i, mun in enumerate(selected_munis, start=1):
-            progress_bar.progress(
-                int(i / total * 100),
-                text=f"Buscando: {mun} ({i}/{total}) — status {status_label.lower()}",
-            )
-
-            muni_id = MUNICIPIOS_PADRAO.get(mun, "").strip()
-            if not muni_id:
-                continue
-
-            items_city = fetch_by_municipio_id(muni_id, status_ui=status_ui, keyword=keyword)
-            all_items.extend(items_city)
-
-        progress_bar.progress(100, text=f"Concluído — {total} município(s) em {time.time()-t0:.1f}s")
-
-        df = normalize_items(all_items)
-        if df.empty:
-            tbl_placeholder.warning(
-                "Nenhum resultado retornado. Tente outro status, palavra-chave ou municípios.",
-                icon="ℹ️",
-            )
+        params = {
+            "palavra_chave": palavra_chave,
+            "uf": uf_escolhida,
+            "codigos_ibge": codigos_ibge_escolhidos,
+            "status_api": status_api,
+        }
+        if nome_pesquisa.strip():
+            st.session_state["pesquisas_salvas"][nome_pesquisa.strip()] = params
+            st.sidebar.success(f"Pesquisa salva: {nome_pesquisa.strip()}")
         else:
-            # links clicáveis na tabela
-            df_view = df.copy()
-            if "Link para o edital" in df_view.columns:
-                df_view["Link para o edital"] = df_view["Link para o edital"].apply(
-                    lambda u: f"[abrir edital]({u})" if u else ""
-                )
-            tbl_placeholder.dataframe(df_view, use_container_width=True)
+            st.sidebar.error("Informe um nome para salvar a pesquisa.")
 
-            # Download apenas XLSX (como aprovado)
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as xw:
-                df.to_excel(xw, index=False, sheet_name="PNCP")
-            st.download_button(
-                "⬇️ Baixar XLSX",
-                data=buf.getvalue(),
-                file_name="pncp_resultados.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                type="primary",
-            )
+# Pesquisas salvas
+salvos = st.session_state.get("pesquisas_salvas", {})
+escolha_salva = st.sidebar.selectbox(
+    "Pesquisas salvas",
+    options=["—"] + list(salvos.keys()),
+    index=0,
+)
+if escolha_salva != "—":
+    params = salvos[escolha_salva]
+    # rehidrata controles (apenas exibição informativa; não alteramos os widgets já renderizados)
+    st.sidebar.info(
+        f"Selecionado: **{escolha_salva}**\n\n"
+        f"- Palavra chave: `{params.get('palavra_chave','')}`\n"
+        f"- UF: `{params.get('uf')}`\n"
+        f"- Municípios: `{len(params.get('codigos_ibge', []))}` selecionados\n"
+        f"- Status: `{ 'Recebendo propostas' if params.get('status_api')=='proposta' else 'Publicadas (30d)'}`"
+    )
+
+st.sidebar.markdown("---")
+executar = st.sidebar.button("Executar Pesquisa")
+
+
+# =========================
+# Corpo — Resultados
+# =========================
+st.title("📑 Acerte Licitações — O seu Buscador de Editais")
+
+if executar:
+    if not uf_escolhida:
+        st.error("Operação cancelada: é obrigatório selecionar um Estado (UF).")
+        st.stop()
+
+    with st.spinner("Consultando PNCP e consolidando resultados..."):
+        df = consultar_editais(
+            palavra_chave=palavra_chave,
+            uf=uf_escolhida,
+            codigos_ibge=codigos_ibge_escolhidos,
+            status_api=status_api,
+        )
+
+    st.subheader("Resultados")
+    st.caption(
+        f"Filtros: UF **{uf_escolhida}** • Municípios selecionados **{len(codigos_ibge_escolhidos)}** • "
+        f"Status **{status_label}** • Palavra-chave **{palavra_chave or '—'}**"
+    )
+
+    # Tabela primeiro (baseline UX)
+    if df.empty:
+        st.warning("Nenhum resultado para os filtros aplicados.")
+    else:
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        # Download XLSX (apenas XLSX, conforme baseline)
+        xlsx = _xlsx_bytes(df, sheet_name="editais")
+        st.download_button(
+            label="⬇️ Baixar XLSX",
+            data=xlsx,
+            file_name=f"editais_{uf_escolhida}_{status_api}_{date.today().isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+else:
+    st.info(
+        "Configure os filtros na **sidebar** e clique em **Executar Pesquisa**.\n\n"
+        "- O campo **Estado** é obrigatório.\n"
+        "- A lista de **Municípios** é derivada automaticamente dos editais com propostas **abertas hoje** na UF.\n"
+        "- Para **Publicadas (últimos 30 dias)**, o sistema usa uma janela de 30 dias."
+    )
