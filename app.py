@@ -26,11 +26,17 @@ PAGE_SIZE = 50
 UFS = ["AC","AL","AM","AP","BA","CE","DF","ES","GO","MA","MG","MS","MT",
        "PA","PB","PE","PI","PR","RJ","RN","RO","RR","RS","SC","SE","SP","TO"]
 
+# Status conforme solicitado
 STATUS_LABELS = ["Recebendo Proposta", "Propostas Encerradas", "Encerradas", "Todos"]
+
+# Janela default para /publicacao
 PUBLICACAO_JANELA_DIAS = 60
+
+# IBGE — fonte oficial
 IBGE_URL = "https://servicodados.ibge.gov.br/api/v1/localidades/municipios?orderBy=nome"
 
-MUNICIPALITY_QUERY_THRESHOLD = 25  # turbo por município quando seleção pequena
+# Otimizador: até este número de municípios, consulta "turbo" por município
+MUNICIPALITY_QUERY_THRESHOLD = 25
 
 
 # =========================
@@ -81,12 +87,19 @@ def _get_session() -> requests.Session:
 
 def _safe_json(r: requests.Response) -> dict:
     """
-    Decodifica JSON com verificação de Content-Type e conteúdo.
-    Em caso de HTML/texto em branco, levanta erro com trecho da resposta para diagnóstico.
+    Decodifica JSON com tolerância a respostas vazias do PNCP.
+    - 204 No Content                      -> {'data': [], 'totalPaginas': 1, 'numeroPagina': 1}
+    - 200 com corpo vazio/whitespace      -> {'data': [], 'totalPaginas': 1, 'numeroPagina': 1}
+    - Content-Type ausente mas corpo JSON -> tenta json()
+    - Content-Type não-JSON e corpo não-vazio -> erro descritivo
     """
-    ctype = (r.headers.get("Content-Type") or "").lower()
+    if r.status_code == 204:
+        return {"data": [], "totalPaginas": 1, "numeroPagina": 1}
     text = r.text or ""
-    # tenta JSON se o content-type indica json ou se claramente começa com {/[...
+    if text.strip() == "":
+        return {"data": [], "totalPaginas": 1, "numeroPagina": 1}
+
+    ctype = (r.headers.get("Content-Type") or "").lower()
     looks_json = ("json" in ctype) or text.strip().startswith(("{", "["))
     if not looks_json:
         snippet = text[:800].strip()
@@ -145,8 +158,9 @@ def ibge_por_uf(uf: str) -> pd.DataFrame:
 # =========================
 def _iterar_paginas(endpoint: str, params_base: Dict[str, str], sleep_s: float = 0.03) -> Iterable[tuple[int, Optional[int], list]]:
     """
-    Faz paginação com até 3 tentativas por página.
+    Paginação com até 3 tentativas por página.
     Em erros HTTP ou resposta não-JSON, detalha o problema.
+    Trata resposta vazia como "sem dados" (encerra sem exceção).
     """
     sess = _get_session()
     pagina = 1
@@ -158,14 +172,13 @@ def _iterar_paginas(endpoint: str, params_base: Dict[str, str], sleep_s: float =
         for attempt in range(1, 4):  # 3 tentativas
             try:
                 r = sess.get(endpoint, params=params, timeout=60)
-                # HTTP error?
                 r.raise_for_status()
-                # JSON seguro
                 payload = _safe_json(r)
                 dados = payload.get("data") or []
                 if not dados:
-                    return  # encerra se vazio
+                    return  # sem dados: encerra normalmente
                 yield pagina, payload.get("totalPaginas"), dados
+
                 numero = payload.get("numeroPagina") or pagina
                 total_pag = payload.get("totalPaginas")
                 if total_pag and numero >= total_pag:
@@ -176,8 +189,7 @@ def _iterar_paginas(endpoint: str, params_base: Dict[str, str], sleep_s: float =
                 break
             except Exception as e:
                 last_err = e
-                # backoff progressivo
-                time.sleep(0.3 * attempt)
+                time.sleep(0.3 * attempt)  # backoff progressivo
         if last_err is not None:
             raise last_err
 
@@ -334,7 +346,7 @@ def normalizar_df(regs: List[dict]) -> pd.DataFrame:
 
 
 # =========================
-# Sidebar — Filtros
+# Sidebar — Filtros (jurimetria operacional, sem firula)
 # =========================
 st.sidebar.header("Filtros")
 
@@ -420,6 +432,7 @@ if executar:
         regs = []
 
         if status_label == "Recebendo Proposta":
+            # Turbo por município quando seleção pequena; UF quando grande
             if 0 < len(codigos_ibge_escolhidos) <= MUNICIPALITY_QUERY_THRESHOLD:
                 regs, total_baixado = consultar_proposta_por_municipios(
                     uf_escolhida, palavra_chave, codigos_ibge_escolhidos
@@ -459,7 +472,7 @@ if executar:
 
         df = normalizar_df(regs)
 
-        # Auditoria de cobertura — municípios selecionados sem retorno
+        # Auditoria: municípios selecionados sem retorno
         selected_set = set(_as_str(x) for x in (codigos_ibge_escolhidos or []))
         presentes = set(_as_str((r.get("unidadeOrgao") or {}).get("codigoIbge")) for r in regs)
         sem_resultado = sorted(list(selected_set - presentes))
@@ -496,7 +509,7 @@ if executar:
     except requests.HTTPError as e:
         st.error(f"Erro na API PNCP: {e}")
     except ValueError as e:
-        # Pega erros de resposta não-JSON (HTML, vazio etc.)
+        # Resposta não-JSON ou não decodificável (com tolerância a vazio implementada)
         st.error(f"Erro de parsing: {e}")
     except Exception as e:
         st.error(f"Falha inesperada: {e}")
@@ -505,9 +518,9 @@ else:
     st.info(
         "Configure os filtros na **sidebar** e clique em **Executar Pesquisa**.\n\n"
         "- **Estado (UF)** é obrigatório.\n"
-        "- **Municípios** são do **IBGE**. Até 25 municípios: consulta direta por município (rápida). "
+        "- **Municípios** são do **IBGE**. Até 25 municípios: consulta por município (rápida). "
         "Acima disso: consulta por **UF** e filtro client-side.\n"
         "- **'Recebendo Proposta'** usa `/proposta` com `dataFinal=yyyyMMdd`.\n"
         "- **'Propostas Encerradas' / 'Encerradas' / 'Todos'** usam `/publicacao` e exigem **códigos de modalidade**.\n"
-        "- Em caso de resposta não-JSON, exibimos o **trecho** retornado para depuração."
+        "- Respostas vazias (204/200 sem corpo) são tratadas como **0 resultados** — sem erro."
     )
