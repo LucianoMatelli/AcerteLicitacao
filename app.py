@@ -1,10 +1,11 @@
-# app.py — 📑 Acerte Licitações — Buscador de Editais (UF obrigatório, municípios por IBGE + turbo seletivo)
+# app.py — 📑 Acerte Licitações — Buscador de Editais (UF obrigatório, municípios IBGE + turbo seletivo)
 # Execução: streamlit run app.py
 # Requisitos: streamlit, requests, pandas, xlsxwriter (ou openpyxl)
 
 from __future__ import annotations
 import io
 import time
+import json
 from datetime import date, timedelta
 from typing import Dict, List, Optional, Iterable
 
@@ -18,24 +19,18 @@ import streamlit as st
 st.set_page_config(page_title="📑 Acerte Licitações", page_icon="📑", layout="wide")
 
 BASE = "https://pncp.gov.br/api/consulta"
-ENDP_PROPOSTA = f"{BASE}/v1/contratacoes/proposta"       # Recebendo Proposta (exige dataFinal=yyyyMMdd; aceita codigoMunicipioIbge)
-ENDP_PUBLICACAO = f"{BASE}/v1/contratacoes/publicacao"   # Publicações (exige codigoModalidadeContratacao + datas=yyyyMMdd; aceita codigoMunicipioIbge)
+ENDP_PROPOSTA = f"{BASE}/v1/contratacoes/proposta"       # Recebendo Proposta (dataFinal=yyyyMMdd; aceita codigoMunicipioIbge)
+ENDP_PUBLICACAO = f"{BASE}/v1/contratacoes/publicacao"   # Publicações (codigoModalidadeContratacao + datas=yyyyMMdd; aceita codigoMunicipioIbge)
 PAGE_SIZE = 50
 
 UFS = ["AC","AL","AM","AP","BA","CE","DF","ES","GO","MA","MG","MS","MT",
        "PA","PB","PE","PI","PR","RJ","RN","RO","RR","RS","SC","SE","SP","TO"]
 
-# Status (labels conforme solicitado)
 STATUS_LABELS = ["Recebendo Proposta", "Propostas Encerradas", "Encerradas", "Todos"]
-
-# Janela padrão para publicações (/publicacao)
 PUBLICACAO_JANELA_DIAS = 60
-
-# IBGE (fonte oficial)
 IBGE_URL = "https://servicodados.ibge.gov.br/api/v1/localidades/municipios?orderBy=nome"
 
-# Otimizador: quando <= este número de municípios selecionados, consulta por município (mais rápido)
-MUNICIPALITY_QUERY_THRESHOLD = 25
+MUNICIPALITY_QUERY_THRESHOLD = 25  # turbo por município quando seleção pequena
 
 
 # =========================
@@ -68,12 +63,52 @@ def _as_str(x) -> str:
 
 
 # =========================
+# HTTP session + parser seguro
+# =========================
+SESSION: Optional[requests.Session] = None
+
+def _get_session() -> requests.Session:
+    global SESSION
+    if SESSION is None:
+        s = requests.Session()
+        s.headers.update({
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": "Acerte-Licitacoes/1.0 (+streamlit; PNCP client)",
+            "Connection": "keep-alive",
+        })
+        SESSION = s
+    return SESSION
+
+def _safe_json(r: requests.Response) -> dict:
+    """
+    Decodifica JSON com verificação de Content-Type e conteúdo.
+    Em caso de HTML/texto em branco, levanta erro com trecho da resposta para diagnóstico.
+    """
+    ctype = (r.headers.get("Content-Type") or "").lower()
+    text = r.text or ""
+    # tenta JSON se o content-type indica json ou se claramente começa com {/[...
+    looks_json = ("json" in ctype) or text.strip().startswith(("{", "["))
+    if not looks_json:
+        snippet = text[:800].strip()
+        raise ValueError(
+            f"Resposta não-JSON do servidor PNCP (Content-Type='{ctype}'). "
+            f"Trecho: {snippet or '<vazio>'}"
+        )
+    try:
+        return r.json()
+    except json.JSONDecodeError as e:
+        snippet = text[:800].strip()
+        raise ValueError(f"Falha ao decodificar JSON. Trecho recebido: {snippet}") from e
+
+
+# =========================
 # IBGE — municípios por UF (com tratamento defensivo + cache)
 # =========================
 @st.cache_data(show_spinner=False, ttl=60*60*24)
 def carregar_ibge_df() -> pd.DataFrame:
     try:
-        r = requests.get(IBGE_URL, timeout=60)
+        s = _get_session()
+        r = s.get(IBGE_URL, timeout=60)
         r.raise_for_status()
         data = r.json()
         rows = []
@@ -106,56 +141,59 @@ def ibge_por_uf(uf: str) -> pd.DataFrame:
 
 
 # =========================
-# PNCP — iteração paginada (com erro detalhado)
+# PNCP — iteração paginada (retry + parser seguro)
 # =========================
-def _iterar_paginas(endpoint: str, params_base: Dict[str, str], sleep_s: float = 0.02) -> Iterable[tuple[int, Optional[int], list]]:
+def _iterar_paginas(endpoint: str, params_base: Dict[str, str], sleep_s: float = 0.03) -> Iterable[tuple[int, Optional[int], list]]:
+    """
+    Faz paginação com até 3 tentativas por página.
+    Em erros HTTP ou resposta não-JSON, detalha o problema.
+    """
+    sess = _get_session()
     pagina = 1
     while True:
-        params = dict(params_base)
-        params.update({"pagina": pagina, "tamanhoPagina": PAGE_SIZE})
-        r = requests.get(endpoint, params=params, timeout=60)
-        try:
-            r.raise_for_status()
-        except requests.HTTPError as http_err:
-            detalhe = ""
-            try:
-                detalhe = r.text[:800]
-            except Exception:
-                pass
-            raise requests.HTTPError(f"{http_err}\nDetalhe PNCP: {detalhe}") from http_err
+        params = {k: _as_str(v) for k, v in params_base.items()}
+        params.update({"pagina": _as_str(pagina), "tamanhoPagina": _as_str(PAGE_SIZE)})
 
-        payload = r.json()
-        dados = payload.get("data") or []
-        if not dados:
-            break
-        yield pagina, payload.get("totalPaginas"), dados
-        numero = payload.get("numeroPagina") or pagina
-        total_pag = payload.get("totalPaginas")
-        if total_pag and numero >= total_pag:
-            break
-        pagina += 1
-        time.sleep(sleep_s)
+        last_err = None
+        for attempt in range(1, 4):  # 3 tentativas
+            try:
+                r = sess.get(endpoint, params=params, timeout=60)
+                # HTTP error?
+                r.raise_for_status()
+                # JSON seguro
+                payload = _safe_json(r)
+                dados = payload.get("data") or []
+                if not dados:
+                    return  # encerra se vazio
+                yield pagina, payload.get("totalPaginas"), dados
+                numero = payload.get("numeroPagina") or pagina
+                total_pag = payload.get("totalPaginas")
+                if total_pag and numero >= total_pag:
+                    return
+                pagina += 1
+                time.sleep(sleep_s)
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                # backoff progressivo
+                time.sleep(0.3 * attempt)
+        if last_err is not None:
+            raise last_err
 
 
 # =========================
 # Consultas — modos turbo (por município) e amplo (por UF)
 # =========================
 def _filtrar_client_side(dados: list, palavra_chave: str, ibges: List[str], status_label: str) -> list:
-    # normaliza set de IBGE como strings
     ibge_set = set(_as_str(x) for x in (ibges or []))
     out = []
-
     for d in dados:
         uo = d.get("unidadeOrgao") or {}
-        # filtro município (se houver seleção)
-        if ibge_set:
-            if _as_str(uo.get("codigoIbge")) not in ibge_set:
-                continue
-        # filtro status (client-side)
-        if status_label != "Todos":
-            if _classificar_status(d.get("situacaoCompraNome")) != status_label:
-                continue
-        # filtro palavra-chave
+        if ibge_set and _as_str(uo.get("codigoIbge")) not in ibge_set:
+            continue
+        if status_label != "Todos" and _classificar_status(d.get("situacaoCompraNome")) != status_label:
+            continue
         if palavra_chave:
             p = palavra_chave.strip().lower()
             texto = " ".join([
@@ -170,7 +208,6 @@ def _filtrar_client_side(dados: list, palavra_chave: str, ibges: List[str], stat
 
 
 def consultar_proposta_por_uf(uf: str, palavra_chave: str, ibges: List[str]) -> tuple[list, int]:
-    """Modo amplo por UF (para muitos municípios): baixa tudo por UF e filtra client-side."""
     params_base = {"uf": uf, "dataFinal": _yyyymmdd(date.today())}
     acumulado = []
     total_baixado = 0
@@ -181,18 +218,14 @@ def consultar_proposta_por_uf(uf: str, palavra_chave: str, ibges: List[str]) -> 
         pag_atual = pag
         total_baixado += len(dados)
         acumulado.extend(dados)
-        if total_pag:
-            barra.progress(min(1.0, pag_atual / float(total_pag)))
-        else:
-            barra.progress(min(0.9, pag_atual * 0.1))
-    barra.progress(1.0)
+        barra.progress(min(1.0, pag_atual / float(total_pag or max(1, pag_atual*10))))
 
+    barra.progress(1.0)
     filtrados = _filtrar_client_side(acumulado, palavra_chave, ibges, "Recebendo Proposta")
     return filtrados, total_baixado
 
 
 def consultar_proposta_por_municipios(uf: str, palavra_chave: str, ibges: List[str]) -> tuple[list, int]:
-    """Modo turbo por municípios (rápido para seleções pequenas): consulta PNCP já com codigoMunicipioIbge."""
     if not ibges:
         return [], 0
     acumulado = []
@@ -206,11 +239,10 @@ def consultar_proposta_por_municipios(uf: str, palavra_chave: str, ibges: List[s
         }
         for _, _, dados in _iterar_paginas(ENDP_PROPOSTA, params_base):
             total_baixado += len(dados)
-            # como já consultamos por município, só aplicamos palavra-chave (status é "Recebendo Proposta" por definição)
-            dados = _filtrar_client_side(dados, palavra_chave, [], "Recebendo Proposta")
+            dados = _filtrar_client_side(dados, palavra_chave, [], "Recebendo Proposta")  # já veio por município
             acumulado.extend(dados)
-        # progresso por município
         barra.progress(min(1.0, i / float(len(ibges))))
+        time.sleep(0.03)
     barra.progress(1.0)
     return acumulado, total_baixado
 
@@ -218,7 +250,6 @@ def consultar_proposta_por_municipios(uf: str, palavra_chave: str, ibges: List[s
 def consultar_publicacao_por_uf_modalidades(uf: str, palavra_chave: str, ibges: List[str],
                                             status_label: str, codigos_modalidade: List[str],
                                             dias_janela: int = PUBLICACAO_JANELA_DIAS) -> tuple[list, int]:
-    """/publicacao por UF (amplo)."""
     if not codigos_modalidade:
         return [], 0
     hoje = date.today()
@@ -238,6 +269,7 @@ def consultar_publicacao_por_uf_modalidades(uf: str, palavra_chave: str, ibges: 
             dados = _filtrar_client_side(dados, palavra_chave, ibges, status_label)
             acumulado.extend(dados)
         barra.progress(min(1.0, idx / float(total_passos)))
+        time.sleep(0.03)
     barra.progress(1.0)
     return acumulado, total_baixado
 
@@ -245,7 +277,6 @@ def consultar_publicacao_por_uf_modalidades(uf: str, palavra_chave: str, ibges: 
 def consultar_publicacao_por_municipios_modalidades(uf: str, palavra_chave: str, ibges: List[str],
                                                     status_label: str, codigos_modalidade: List[str],
                                                     dias_janela: int = PUBLICACAO_JANELA_DIAS) -> tuple[list, int]:
-    """/publicacao turbo: itera por município + modalidade (para seleções pequenas)."""
     if not (ibges and codigos_modalidade):
         return [], 0
     hoje = date.today()
@@ -265,10 +296,11 @@ def consultar_publicacao_por_municipios_modalidades(uf: str, palavra_chave: str,
             params["codigoMunicipioIbge"] = _as_str(ibge)
             for _, _, dados in _iterar_paginas(ENDP_PUBLICACAO, params):
                 total_baixado += len(dados)
-                dados = _filtrar_client_side(dados, palavra_chave, [], status_label)  # ibge já filtrado server-side
+                dados = _filtrar_client_side(dados, palavra_chave, [], status_label)  # já veio por município
                 acumulado.extend(dados)
             passo += 1
             barra.progress(min(1.0, passo / float(max(1, total_passos))))
+            time.sleep(0.03)
     barra.progress(1.0)
     return acumulado, total_baixado
 
@@ -389,13 +421,10 @@ if executar:
 
         if status_label == "Recebendo Proposta":
             if 0 < len(codigos_ibge_escolhidos) <= MUNICIPALITY_QUERY_THRESHOLD:
-                # turbo por município (rápido para 17 mun., por ex.)
                 regs, total_baixado = consultar_proposta_por_municipios(
                     uf_escolhida, palavra_chave, codigos_ibge_escolhidos
                 )
-                total_baixado_uf = None  # não aplicável
             else:
-                # amplo por UF (e filtra client-side)
                 regs, total_baixado = consultar_proposta_por_uf(
                     uf_escolhida, palavra_chave, codigos_ibge_escolhidos
                 )
@@ -418,7 +447,6 @@ if executar:
                         status_label=status_label,
                         codigos_modalidade=cod_modalidades,
                     )
-                    total_baixado_uf = None
                 else:
                     regs, total_baixado = consultar_publicacao_por_uf_modalidades(
                         uf=uf_escolhida,
@@ -431,11 +459,10 @@ if executar:
 
         df = normalizar_df(regs)
 
-        # Auditoria de cobertura: quais municípios selecionados retornaram (ou não) resultados?
+        # Auditoria de cobertura — municípios selecionados sem retorno
         selected_set = set(_as_str(x) for x in (codigos_ibge_escolhidos or []))
         presentes = set(_as_str((r.get("unidadeOrgao") or {}).get("codigoIbge")) for r in regs)
         sem_resultado = sorted(list(selected_set - presentes))
-        # Nomear os "sem resultado"
         nomes_por_ibge = {v: k for k, v in ({} if not opcoes_municipios else opcoes_municipios.items())}
         nomes_sem = [nomes_por_ibge.get(ibge, ibge) for ibge in sem_resultado]
 
@@ -446,12 +473,10 @@ if executar:
             f"Status **{status_label}** • Palavra-chave **{palavra_chave or '—'}** • Execução **{hoje_txt}**"
         )
 
-        # Resumo de performance
-        metrica_total = len(regs)
         if total_baixado_uf is not None:
-            st.info(f"Coleta por UF: {total_baixado_uf} item(ns) recebidos do PNCP; após filtros: {metrica_total}.")
+            st.info(f"Coleta por UF: {total_baixado_uf} item(ns) recebidos do PNCP; após filtros: {len(df)}.")
         else:
-            st.info(f"Coleta por municípios selecionados: {metrica_total} item(ns) após filtros.")
+            st.info(f"Coleta por municípios selecionados: {len(df)} item(ns) após filtros.")
 
         if nomes_sem:
             st.warning(f"Sem resultados para: {', '.join(nomes_sem)}")
@@ -470,6 +495,9 @@ if executar:
 
     except requests.HTTPError as e:
         st.error(f"Erro na API PNCP: {e}")
+    except ValueError as e:
+        # Pega erros de resposta não-JSON (HTML, vazio etc.)
+        st.error(f"Erro de parsing: {e}")
     except Exception as e:
         st.error(f"Falha inesperada: {e}")
 
@@ -477,8 +505,9 @@ else:
     st.info(
         "Configure os filtros na **sidebar** e clique em **Executar Pesquisa**.\n\n"
         "- **Estado (UF)** é obrigatório.\n"
-        "- **Municípios** são do **IBGE**. Quando selecionar poucos municípios (≤ 25), a consulta usa **código IBGE** "
-        "diretamente no PNCP (mais rápida). Para seleções maiores, consulta a **UF inteira** e filtra client-side.\n"
+        "- **Municípios** são do **IBGE**. Até 25 municípios: consulta direta por município (rápida). "
+        "Acima disso: consulta por **UF** e filtro client-side.\n"
         "- **'Recebendo Proposta'** usa `/proposta` com `dataFinal=yyyyMMdd`.\n"
-        "- **'Propostas Encerradas' / 'Encerradas' / 'Todos'** usam `/publicacao` e exigem **códigos de modalidade**."
+        "- **'Propostas Encerradas' / 'Encerradas' / 'Todos'** usam `/publicacao` e exigem **códigos de modalidade**.\n"
+        "- Em caso de resposta não-JSON, exibimos o **trecho** retornado para depuração."
     )
