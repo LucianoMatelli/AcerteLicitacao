@@ -22,20 +22,15 @@ st.set_page_config(
 )
 
 BASE = "https://pncp.gov.br/api/consulta"
-ENDP_PROPOSTA = f"{BASE}/v1/contratacoes/proposta"       # (mantido para futuro; não usado p/ derivar municípios)
-ENDP_PUBLICACAO = f"{BASE}/v1/contratacoes/publicacao"   # usado p/ derivar municípios e listar editais
+ENDP_PUBLICACAO = f"{BASE}/v1/contratacoes/publicacao"   # janela [dataInicial, dataFinal] (estável)
+PAGE_SIZE = 50                                           # por Swagger
 
 UFS = ["AC","AL","AM","AP","BA","CE","DF","ES","GO","MA","MG","MS","MT",
        "PA","PB","PE","PI","PR","RJ","RN","RO","RR","RS","SC","SE","SP","TO"]
 
-# Nova taxonomia de status (nomes exibidos na UI)
+# Status exigidos na UI (classificação client-side)
 STATUS_LABELS = ["Recebendo Proposta", "Propostas Encerradas", "Encerradas", "Todos"]
-
-# Janela padrão para publicações (suficiente para derivar municípios e filtrar por status)
-PUBLICACAO_JANELA_DIAS = 60
-
-PAGE_SIZE = 50  # limite máximo por página segundo o OpenAPI
-
+PUBLICACAO_JANELA_DIAS = 60  # janela default p/ publicações
 
 # =========================
 # Helpers
@@ -50,20 +45,46 @@ def _xlsx_bytes(df: pd.DataFrame, sheet_name: str = "resultados") -> bytes:
         return buffer.getvalue()
 
 def _classificar_status(nome: Optional[str]) -> str:
-    """Mapeia o campo situacaoCompraNome para os buckets exigidos pela UI."""
+    """Bucketiza 'situacaoCompraNome' para a taxonomia exigida na UI."""
     s = (_normalize_text(nome)).lower()
-    # Atenção: o PNCP pode variar termos, então usamos padrões inclusivos
-    if "receb" in s:                          # "Recebendo propostas", "A receber propostas", etc.
+    if "receb" in s:                          # A Receber/Recebendo Propostas
         return "Recebendo Proposta"
     if "julg" in s or "propostas encerradas" in s:
         return "Propostas Encerradas"
-    if "encerrad" in s:                       # "Encerrada"
+    if "encerrad" in s:                       # Encerradas
         return "Encerradas"
-    return "Todos"  # fallback cai em "Todos" (permite exibir quando filtro = Todos)
-
+    return "Todos"
 
 # =========================
-# Data Access (API PNCP)
+# IBGE — Fonte oficial para o multiselect de municípios
+# =========================
+IBGE_URL = "https://servicodados.ibge.gov.br/api/v1/localidades/municipios?orderBy=nome"
+
+@st.cache_data(show_spinner=False, ttl=60*60*24)
+def carregar_ibge() -> pd.DataFrame:
+    """
+    Baixa a lista completa de municípios do IBGE (nome, UF, código) e retorna DataFrame.
+    Colunas: municipio, uf, codigo_ibge (str).
+    """
+    r = requests.get(IBGE_URL, timeout=60)
+    r.raise_for_status()
+    data = r.json()
+    rows = []
+    for m in data:
+        nome = m["nome"]
+        uf = m["microrregiao"]["mesorregiao"]["UF"]["sigla"]
+        codigo = str(m["id"])
+        rows.append({"municipio": nome, "uf": uf, "codigo_ibge": codigo})
+    df = pd.DataFrame(rows).sort_values(["uf", "municipio"]).reset_index(drop=True)
+    return df
+
+@st.cache_data(show_spinner=False, ttl=60*60*24)
+def ibge_por_uf(uf: str) -> pd.DataFrame:
+    df = carregar_ibge()
+    return df[df["uf"] == uf].copy()
+
+# =========================
+# PNCP — Consulta
 # =========================
 def _iterar_paginas(endpoint: str, params_base: Dict[str, str], sleep_s: float = 0.05):
     pagina = 1
@@ -84,30 +105,6 @@ def _iterar_paginas(endpoint: str, params_base: Dict[str, str], sleep_s: float =
         pagina += 1
         time.sleep(sleep_s)
 
-@st.cache_data(show_spinner=False, ttl=60*60)
-def derivar_municipios_por_uf(uf: str, data_ini_iso: str, data_fim_iso: str) -> List[Dict]:
-    """
-    Deriva lista única de municípios (nome/UF/IBGE) com base nas PUBLICAÇÕES na UF.
-    Usamos /publicacao para evitar 422 e garantir cobertura, em janela temporal.
-    """
-    vistos: Dict[str, Dict] = {}
-    params_base = {
-        "uf": uf,
-        "dataInicial": data_ini_iso,
-        "dataFinal": data_fim_iso,
-    }
-    for _, _, dados in _iterar_paginas(ENDP_PUBLICACAO, params_base):
-        for d in dados:
-            uo = d.get("unidadeOrgao") or {}
-            nome = uo.get("municipioNome")
-            ibge = uo.get("codigoIbge")
-            sigla = uo.get("ufSigla") or uf
-            if nome and ibge:
-                vistos.setdefault(str(ibge), {"municipio": nome, "uf": sigla, "codigo_ibge": str(ibge)})
-    out = list(vistos.values())
-    out.sort(key=lambda x: (x["uf"], x["municipio"]))
-    return out
-
 def consultar_editais(
     palavra_chave: str,
     uf: str,
@@ -117,11 +114,9 @@ def consultar_editais(
     data_fim_iso: str,
 ) -> pd.DataFrame:
     """
-    Consulta editais via /publicacao (janela [data_ini, data_fim]) e aplica:
-      - filtro por UF (server-side),
-      - filtro por municípios (client-side via IBGE),
-      - filtro por status (client-side com _classificar_status),
-      - filtro por palavra-chave (client-side).
+    Estratégia pedida:
+    1) Buscar no PNCP por UF (server-side) na janela temporal escolhida (/publicacao).
+    2) Filtrar client-side pelos municípios selecionados (IBGE), status e palavra-chave.
     """
     params_base = {"uf": uf, "dataInicial": data_ini_iso, "dataFinal": data_fim_iso}
 
@@ -133,18 +128,17 @@ def consultar_editais(
     for pagina, total_pag, dados in _iterar_paginas(ENDP_PUBLICACAO, params_base):
         pagina_atual = pagina
 
-        # Filtro por municípios (IBGE)
+        # Filtro por municípios (IBGE) — conforme sua estratégia
         if codigos_ibge:
-            ibge_set = set(str(x) for x in codigos_ibge)
+            ibge_set = set(codigos_ibge)
             dados = [d for d in dados if ((d.get("unidadeOrgao") or {}).get("codigoIbge") in ibge_set)]
 
-        # Filtro por status
+        # Filtro por status (classificação client-side)
         if status_label != "Todos":
             dados = [d for d in dados if _classificar_status(d.get("situacaoCompraNome")) == status_label]
 
-        # Filtro por palavra-chave (campo objeto/observações/nome unidade)
+        # Filtro por palavra-chave (robusto; sem depender de parâmetro textual da API)
         if palavra_chave:
-            alvos = []
             palavra = palavra_chave.strip().lower()
             def _tem_palavra(d):
                 uo = d.get("unidadeOrgao") or {}
@@ -166,13 +160,12 @@ def consultar_editais(
 
     barra.progress(1.0)
 
-    # Normalização de colunas
+    # Normalização
     linhas = []
     for d in acumulado:
         uo = d.get("unidadeOrgao") or {}
-        classe = _classificar_status(d.get("situacaoCompraNome"))
         linhas.append({
-            "Status (bucket)": classe,
+            "Status (bucket)": _classificar_status(d.get("situacaoCompraNome")),
             "Situação (PNCP)": d.get("situacaoCompraNome"),
             "UF": uo.get("ufSigla"),
             "Município": uo.get("municipioNome"),
@@ -195,45 +188,38 @@ def consultar_editais(
         df = df.sort_values(by=["Publicação PNCP", "Município"], ascending=[False, True])
     return df
 
-
 # =========================
-# Sidebar — Filtros
+# Sidebar — Filtros (exatos conforme seu pedido)
 # =========================
 st.sidebar.header("Filtros")
 
-# Palavra chave
+# 1) Palavra chave
 palavra_chave = st.sidebar.text_input("Palavra chave", value="")
 
-# Estado (obrigatório)
+# 2) Estado (obrigatório)
 uf_escolhida = st.sidebar.selectbox("Estado", options=UFS, index=UFS.index("SP"))
 if not uf_escolhida:
     st.sidebar.error("Selecione um Estado (UF).")
 
-# Derivar municípios com base em PUBLICAÇÕES (janela móvel)
-hoje = date.today()
-data_ini_iso = (hoje - timedelta(days=PUBLICACAO_JANELA_DIAS)).isoformat()
-data_fim_iso = hoje.isoformat()
-
+# 3) Municípios (lista do IBGE, filtrada pela UF)
 try:
-    municipios_derivados = derivar_municipios_por_uf(uf_escolhida, data_ini_iso, data_fim_iso)
+    df_ibge_uf = ibge_por_uf(uf_escolhida)
+    opcoes_municipios = {f"{row.municipio} / {row.uf}": row.codigo_ibge for _, row in df_ibge_uf.iterrows()}
 except Exception as e:
-    st.sidebar.warning(f"Não foi possível derivar municípios para {uf_escolhida}: {e}")
-    municipios_derivados = []
+    st.sidebar.warning(f"Falha ao carregar municípios do IBGE: {e}")
+    opcoes_municipios = {}
 
-label_to_ibge = {f"{m['municipio']} / {m['uf']}": m["codigo_ibge"] for m in municipios_derivados}
-municipios_selecionados_labels = st.sidebar.multiselect("Municipios", options=list(label_to_ibge.keys()), default=[])
-codigos_ibge_escolhidos = [label_to_ibge[l] for l in municipios_selecionados_labels]
+municipios_selecionados_labels = st.sidebar.multiselect("Municipios", options=list(opcoes_municipios.keys()))
+codigos_ibge_escolhidos = [opcoes_municipios[l] for l in municipios_selecionados_labels]
 
-# Status (quatro opções exigidas)
+# 4) Status — quatro opções
 status_label = st.sidebar.selectbox("Status", options=STATUS_LABELS, index=0)
 
-st.sidebar.markdown("---")
-
-# Salvar pesquisa
+# 5) Salvar pesquisa
 if "pesquisas_salvas" not in st.session_state:
     st.session_state["pesquisas_salvas"] = {}
+nome_pesquisa = st.sidebar.text_input("Salvar pesquisa", value="", placeholder="Ex.: SP — Saúde — Encerradas")
 
-nome_pesquisa = st.sidebar.text_input("Salvar pesquisa", value="", placeholder="Ex.: SP — propostas educação")
 if st.sidebar.button("Salvar pesquisa"):
     if not uf_escolhida:
         st.sidebar.error("Para salvar, selecione um Estado (UF).")
@@ -243,12 +229,10 @@ if st.sidebar.button("Salvar pesquisa"):
             "uf": uf_escolhida,
             "codigos_ibge": codigos_ibge_escolhidos,
             "status_label": status_label,
-            "data_ini_iso": data_ini_iso,
-            "data_fim_iso": data_fim_iso,
         }
         st.sidebar.success("Pesquisa salva.")
 
-# Pesquisas salvas
+# 6) Pesquisas salvas
 salvos = st.session_state.get("pesquisas_salvas", {})
 escolha_salva = st.sidebar.selectbox("Pesquisas salvas", options=["—"] + list(salvos.keys()), index=0)
 if escolha_salva != "—":
@@ -264,11 +248,15 @@ if escolha_salva != "—":
 st.sidebar.markdown("---")
 executar = st.sidebar.button("Executar Pesquisa")
 
-
 # =========================
 # Corpo — Resultados
 # =========================
 st.title("📑 Acerte Licitações — O seu Buscador de Editais")
+
+# Janela temporal padrão para /publicacao
+hoje = date.today()
+data_ini_iso = (hoje - timedelta(days=PUBLICACAO_JANELA_DIAS)).isoformat()
+data_fim_iso = hoje.isoformat()
 
 if executar:
     if not uf_escolhida:
@@ -307,6 +295,7 @@ else:
     st.info(
         "Configure os filtros na **sidebar** e clique em **Executar Pesquisa**.\n\n"
         "- **Estado (UF)** é obrigatório.\n"
-        "- **Municípios** são derivados das **Publicações** da UF numa janela móvel.\n"
-        "- **Status** aplica classificação client-side sobre `situacaoCompraNome`."
+        "- **Municípios** vêm do **IBGE** (filtrados pela UF) e são aplicados **client-side** após a busca por UF.\n"
+        "- **Status** é classificado client-side (Recebendo Proposta, Propostas Encerradas, Encerradas, Todos).\n"
+        "- Janela padrão para **Publicadas**: últimos 60 dias."
     )
