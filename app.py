@@ -1,4 +1,4 @@
-# app.py — 📑 PNCP por UF + filtro por NOME do município (sem IBGE/códigos)
+# app.py — 📑 PNCP: consulta por MUNICÍPIO (pelo NOME) diretamente na API
 # Execução: streamlit run app.py
 # Requisitos: streamlit, requests, pandas, xlsxwriter (ou openpyxl)
 
@@ -7,7 +7,7 @@ import io
 import time
 import json
 from datetime import date, timedelta
-from typing import Dict, List, Optional, Iterable, Set, Tuple
+from typing import Dict, List, Optional, Iterable, Tuple
 
 import pandas as pd
 import requests
@@ -16,27 +16,27 @@ import streamlit as st
 # =========================
 # Config & Constantes
 # =========================
-st.set_page_config(page_title="📑 PNCP UF + Municípios (por nome)", page_icon="📑", layout="wide")
+st.set_page_config(page_title="📑 PNCP por Município (nome)", page_icon="📑", layout="wide")
 
 BASE = "https://pncp.gov.br/api/consulta"
-ENDP_PROPOSTA = f"{BASE}/v1/contratacoes/proposta"       # Recebendo Proposta (dataFinal=yyyyMMdd; CONSULTA POR UF)
-ENDP_PUBLICACAO = f"{BASE}/v1/contratacoes/publicacao"   # Publicações (codigoModalidadeContratacao + datas=yyyyMMdd; CONSULTA POR UF)
+ENDP_PROPOSTA = f"{BASE}/v1/contratacoes/proposta"       # Recebendo Proposta (dataFinal=yyyyMMdd)
+ENDP_PUBLICACAO = f"{BASE}/v1/contratacoes/publicacao"   # Publicações (codigoModalidadeContratacao + datas=yyyyMMdd)
 
-PAGE_SIZE = 50                  # tamanho de página principal
-ALT_PAGE_SIZE = 20              # fallback se a API oscilar
-MAX_BLANK_PAGES = 2             # encerra paginação após N páginas consecutivas vazias
-RETRY_PER_PAGE = 3              # tentativas por página
+PAGE_SIZE = 50
+ALT_PAGE_SIZE = 20
+MAX_BLANK_PAGES = 2
+RETRY_PER_PAGE = 3
 SLEEP_BETWEEN_PAGES = 0.03
 
-UFS = ["AC","AL","AM","AP","BA","CE","DF","ES","GO","MA","MG","MS","MT",
-       "PA","PB","PE","PI","PR","RJ","RN","RO","RR","RS","SC","SE","SP","TO"]
-
 STATUS_LABELS = ["Recebendo Proposta", "Propostas Encerradas", "Encerradas", "Todos"]
-PUBLICACAO_JANELA_DIAS = 60     # janela default para /publicacao
+PUBLICACAO_JANELA_DIAS = 60
 
-# Amostragem expandida em /proposta (para contornar paginação truncada do PNCP)
-PROPOSTA_DIAS_RETROATIVOS_DEFAULT = 28
-PROPOSTA_PASSO_DIAS_DEFAULT = 7
+# Variações de nome de parâmetro para município por NOME
+MUNICIPIO_PARAM_VARIANTS = ["municipio", "municipioNome", "nomeMunicipio"]
+
+# Amostragem opcional (caso precise aumentar abrangência temporal do /proposta)
+PROPOSTA_DIAS_RETROATIVOS_DEFAULT = 0   # 0 = só hoje
+PROPOSTA_PASSO_DIAS_DEFAULT = 1         # irrelevante se dias_retro=0
 
 
 # =========================
@@ -51,9 +51,6 @@ def _yyyymmdd(d: date) -> str:
 def _as_str(x) -> str:
     return "" if x is None else str(x)
 
-def _mun_key(s: Optional[str]) -> str:
-    return _normalize_text(s).casefold()
-
 def _classificar_status(nome: Optional[str]) -> str:
     s = _normalize_text(nome).lower()
     if "receb" in s:                          # a receber / recebendo propostas
@@ -63,20 +60,6 @@ def _classificar_status(nome: Optional[str]) -> str:
     if "encerrad" in s:
         return "Encerradas"
     return "Todos"
-
-def _uniq_key_processo(d: dict) -> Tuple:
-    """
-    Chave de deduplicação robusta:
-    - preferir 'numeroControlePNCP' se existir
-    - senão: (anoCompra, sequencialCompra, cnpj do órgão)
-    """
-    ncp = d.get("numeroControlePNCP")
-    if ncp:
-        return ("NCP", _as_str(ncp))
-    ano = d.get("anoCompra")
-    seq = d.get("sequencialCompra")
-    org = (d.get("orgaoEntidade") or {}).get("cnpj")
-    return ("LEGACY", _as_str(ano), _as_str(seq), _as_str(org))
 
 def _xlsx_bytes(df: pd.DataFrame, sheet_name: str = "resultados") -> bytes:
     with io.BytesIO() as buffer:
@@ -96,7 +79,7 @@ def _get_session() -> requests.Session:
         s = requests.Session()
         s.headers.update({
             "Accept": "application/json, text/plain, */*",
-            "User-Agent": "PNCP-UF-Municipio/1.0 (Streamlit)",
+            "User-Agent": "PNCP-Municipio-Nome/1.0 (Streamlit)",
             "Connection": "keep-alive",
         })
         SESSION = s
@@ -131,13 +114,13 @@ def _safe_json(r: requests.Response) -> dict:
 
 
 # =========================
-# PNCP — paginação (retry + scroll contínuo)
+# Paginação com fallback e scroll contínuo
 # =========================
 def _paginacao(endpoint: str, params_base: Dict[str, str], page_size: int = PAGE_SIZE) -> Iterable[list]:
     """
     Itera páginas até ocorrerem MAX_BLANK_PAGES consecutivas vazias.
-    Ignora 'totalPaginas' do payload (PNCP pode truncar).
-    Faz até RETRY_PER_PAGE tentativas por página, com backoff incremental.
+    Ignora 'totalPaginas' do payload (pode ser truncado no backend).
+    RETRY_PER_PAGE tentativas por página, com backoff incremental.
     """
     sess = _get_session()
     pagina = 1
@@ -158,7 +141,7 @@ def _paginacao(endpoint: str, params_base: Dict[str, str], page_size: int = PAGE
                     if blank_streak >= MAX_BLANK_PAGES:
                         return
                     else:
-                        break  # tenta próxima página (pode ser truncagem)
+                        break
                 else:
                     blank_streak = 0
                     yield dados
@@ -180,70 +163,101 @@ def _paginacao(endpoint: str, params_base: Dict[str, str], page_size: int = PAGE
 
 
 # =========================
-# Consultas — UF-only (NÃO usar código/IBGE; nomes apenas no filtro local)
+# Descoberta automática do nome do parâmetro de município
 # =========================
-def _consultar_proposta_uf_na_data(uf: str, data_final: date) -> List[dict]:
-    """Consulta /proposta por UF em um 'corte' de dataFinal (yyyyMMdd)."""
-    params = {"uf": uf, "dataFinal": _yyyymmdd(data_final)}
-    acumulado = []
-    for dados in _paginacao(ENDP_PROPOSTA, params, page_size=PAGE_SIZE):
-        acumulado.extend(dados)
-    return acumulado
-
-def consultar_proposta_uf_batched(uf: str, dias_retro: int, passo_dias: int) -> List[dict]:
+def _descobrir_parametro_municipio(endpoint: str, base_params: Dict[str, str], municipio_nome: str) -> Optional[str]:
     """
-    Amostragem expandida: várias coletas por UF variando dataFinal (ex.: hoje, -7, -14, -21, -28),
-    agregando e DEDUPLICANDO por numeroControlePNCP/ano+seq+cnpj.
+    Testa as variações conhecidas de nome de parâmetro para município por NOME.
+    Retorna a primeira chave funcional (200 com JSON, ainda que vazio).
+    """
+    sess = _get_session()
+    for chave in MUNICIPIO_PARAM_VARIANTS:
+        params = dict(base_params)
+        params[chave] = municipio_nome
+        try:
+            r = sess.get(endpoint, params=params, timeout=30)
+            if r.status_code in (200, 204):
+                # Considera válida se não retornou 4xx/5xx
+                _ = _safe_json(r)  # valida JSON ou vazio tolerado
+                return chave
+        except Exception:
+            pass
+    return None
+
+
+# =========================
+# Consultas — por município (NOME)
+# =========================
+def consultar_proposta_por_municipio_nome(municipio_nome: str, dias_retro: int = 0, passo_dias: int = 1) -> List[dict]:
+    """
+    /proposta com município pelo NOME: tenta automaticamente o nome de parâmetro correto.
+    Pode fazer amostragem temporal se desejar (dias_retro>0).
     """
     hoje = date.today()
     cortes = [hoje - timedelta(days=delta) for delta in range(0, max(1, dias_retro)+1, max(1, passo_dias))]
+
+    # Descobre a chave de parâmetro com um "ping" usando o primeiro corte
+    base_ping = {"dataFinal": _yyyymmdd(cortes[0])}
+    chave = _descobrir_parametro_municipio(ENDP_PROPOSTA, base_ping, municipio_nome)
+    if not chave:
+        st.warning(f"Não foi possível identificar o parâmetro de município por nome para '{municipio_nome}'.")
+        return []
+
+    registros = []
     barra = st.progress(0.0)
-    total_lotes = len(cortes)
-    registros: Dict[Tuple, dict] = {}
-    total_baixado_somas = 0
-
     for idx, corte in enumerate(cortes, start=1):
-        lote = _consultar_proposta_uf_na_data(uf, corte)
-        total_baixado_somas += len(lote)
-        for d in lote:
-            registros[_uniq_key_processo(d)] = d  # dedup
-        barra.progress(min(1.0, idx / float(total_lotes)))
+        params = {"dataFinal": _yyyymmdd(corte), chave: municipio_nome}
+        for dados in _paginacao(ENDP_PROPOSTA, params, page_size=PAGE_SIZE):
+            registros.extend(dados)
+        barra.progress(min(1.0, idx / float(len(cortes))))
         time.sleep(0.02)
+    return registros
 
-    st.session_state["_telemetria_proposta_total_uf"] = total_baixado_somas
-    return list(registros.values())
 
-def consultar_publicacao_por_uf_modalidades(uf: str, codigos_modalidade: List[str],
+def consultar_publicacao_por_municipio_nome(municipio_nome: str, codigos_modalidade: List[str],
                                             dias_janela: int = PUBLICACAO_JANELA_DIAS) -> List[dict]:
     """
-    /publicacao por UF (datas yyyyMMdd) — agrega por modalidade; sem município na API.
+    /publicacao com município pelo NOME (exige códigos de modalidade).
+    Descobre automaticamente a chave de parâmetro que funciona.
     """
     if not codigos_modalidade:
         return []
     hoje = date.today()
-    params_comuns = {
-        "uf": uf,
+    base_ping = {
         "dataInicial": _yyyymmdd(hoje - timedelta(days=dias_janela)),
         "dataFinal": _yyyymmdd(hoje),
+        # sem modalidade no ping para testar a chave; alguns ambientes exigem,
+        # então se falhar no ping, vamos tentar com a 1ª modalidade
     }
+    chave = _descobrir_parametro_municipio(ENDP_PUBLICACAO, base_ping, municipio_nome)
+    if not chave:
+        # tenta ping com modalidade (há ambientes que 422 sem a modalidade)
+        base_ping2 = dict(base_ping)
+        base_ping2["codigoModalidadeContratacao"] = _as_str(codigos_modalidade[0])
+        chave = _descobrir_parametro_municipio(ENDP_PUBLICACAO, base_ping2, municipio_nome)
+        if not chave:
+            st.warning(f"Não foi possível identificar o parâmetro de município por nome para '{municipio_nome}' em /publicacao.")
+            return []
+
     acumulado = []
     barra = st.progress(0.0)
     total_passos = len(codigos_modalidade)
-    total_baixado = 0
     for idx, cod in enumerate(codigos_modalidade, start=1):
-        params = dict(params_comuns)
-        params["codigoModalidadeContratacao"] = _as_str(cod)
+        params = {
+            "dataInicial": _yyyymmdd(hoje - timedelta(days=dias_janela)),
+            "dataFinal": _yyyymmdd(hoje),
+            "codigoModalidadeContratacao": _as_str(cod),
+            chave: municipio_nome,
+        }
         for dados in _paginacao(ENDP_PUBLICACAO, params, page_size=PAGE_SIZE):
-            total_baixado += len(dados)
             acumulado.extend(dados)
         barra.progress(min(1.0, idx / float(total_passos)))
         time.sleep(0.02)
-    st.session_state["_telemetria_publicacao_total_uf"] = total_baixado
     return acumulado
 
 
 # =========================
-# Filtragem client-side (por NOME de município)
+# Filtros locais (palavra-chave e status)
 # =========================
 def filtrar_por_status_palavra(dados: list, palavra_chave: str, status_label: str) -> list:
     out = []
@@ -261,17 +275,6 @@ def filtrar_por_status_palavra(dados: list, palavra_chave: str, status_label: st
             if p not in texto:
                 continue
         out.append(d)
-    return out
-
-def filtrar_por_municipios_por_nome(dados: list, nomes_municipios: Set[str]) -> list:
-    if not nomes_municipios:
-        return dados
-    keys = set(_mun_key(n) for n in nomes_municipios)
-    out = []
-    for d in dados:
-        uo = d.get("unidadeOrgao") or {}
-        if _mun_key(uo.get("municipioNome")) in keys:
-            out.append(d)
     return out
 
 
@@ -303,21 +306,18 @@ def normalizar_df(regs: List[dict]) -> pd.DataFrame:
 
 
 # =========================
-# Sidebar — Filtros (sem IBGE/código)
+# Sidebar — Filtros (sem UF e sem códigos)
 # =========================
 st.sidebar.header("Filtros")
 
 palavra_chave = st.sidebar.text_input("Palavra chave", value="")
 
-uf_escolhida = st.sidebar.selectbox("Estado (UF) — obrigatório", options=UFS, index=UFS.index("SP"))
-if not uf_escolhida:
-    st.sidebar.error("Selecione um Estado (UF).")
-
-# MUNICÍPIOS POR NOME — não usamos IBGE/código; entrada livre
+# MUNICÍPIOS POR NOME — entrada livre (um ou vários)
 mun_input = st.sidebar.text_area(
     "Municípios (por nome, separados por vírgula ou quebra de linha)",
-    value="", height=80,
-    placeholder="Ex.: Porto Feliz, Itapetininga, Sorocaba"
+    value="",
+    height=90,
+    placeholder="Ex.: Porto Feliz\nItapetininga\nSorocaba"
 )
 municipios_selecionados = [m.strip() for chunk in mun_input.split("\n") for m in chunk.split(",")]
 municipios_selecionados = [m for m in municipios_selecionados if m]
@@ -333,22 +333,21 @@ if status_label != "Recebendo Proposta":
         placeholder="Ex.: 5, 6, 23 (Pregão, Concorrência etc.)"
     )
 
-with st.sidebar.expander("Amostragem por datas em /proposta (avançado)", expanded=False):
-    dias_retro = st.number_input("Dias retroativos", min_value=0, max_value=120,
+with st.sidebar.expander("Amostragem por datas em /proposta (opcional)", expanded=False):
+    dias_retro = st.number_input("Dias retroativos (proposta)", min_value=0, max_value=120,
                                  value=PROPOSTA_DIAS_RETROATIVOS_DEFAULT, step=7)
     passo_dias = st.number_input("Passo (dias) entre coletas", min_value=1, max_value=30,
                                  value=PROPOSTA_PASSO_DIAS_DEFAULT, step=1)
-    st.caption("Ex.: 28 dias com passo 7 ⇒ coletas em: hoje, -7, -14, -21, -28.")
+    st.caption("Ex.: 0 = apenas hoje. 28/7 = hoje, -7, -14, -21, -28.")
 
 st.sidebar.markdown("---")
 
 if "pesquisas_salvas" not in st.session_state:
     st.session_state["pesquisas_salvas"] = {}
-nome_pesquisa = st.sidebar.text_input("Salvar pesquisa", value="", placeholder="Ex.: SP — Recebendo — Porto Feliz")
+nome_pesquisa = st.sidebar.text_input("Salvar pesquisa", value="", placeholder="Ex.: Recebendo — Porto Feliz")
 if st.sidebar.button("Salvar pesquisa"):
     st.session_state["pesquisas_salvas"][nome_pesquisa.strip() or f"Pesquisa {len(st.session_state['pesquisas_salvas'])+1}"] = {
         "palavra_chave": palavra_chave,
-        "uf": uf_escolhida,
         "municipios": municipios_selecionados,
         "status": status_label,
         "modalidades": modalidades_str,
@@ -364,11 +363,10 @@ if escolha_salva != "—":
     st.sidebar.info(
         f"**{escolha_salva}**\n\n"
         f"- Palavra chave: `{p.get('palavra_chave','')}`\n"
-        f"- UF: `{p.get('uf')}`\n"
         f"- Municípios: `{', '.join(p.get('municipios', [])) or '—'}`\n"
         f"- Status: `{p.get('status')}`\n"
         f"- Modalidades: `{p.get('modalidades') or '—'}`\n"
-        f"- Dias retro: `{p.get('dias_retro', PROPOSTA_DIAS_RETROATIVOS_DEFAULT)}` • Passo: `{p.get('passo_dias', PROPOSTA_PASSO_DIAS_DEFAULT)}`"
+        f"- Dias retro: `{p.get('dias_retro', 0)}` • Passo: `{p.get('passo_dias', 1)}`"
     )
 
 st.sidebar.markdown("---")
@@ -378,68 +376,63 @@ executar = st.sidebar.button("Executar Pesquisa")
 # =========================
 # Corpo — Resultados
 # =========================
-st.title("📑 PNCP — Consulta por UF + filtro por NOME do município")
+st.title("📑 PNCP — Consulta por NOME do Município (sem UF e sem códigos)")
 
 if executar:
-    if not uf_escolhida:
-        st.error("Operação cancelada: o campo **Estado** é obrigatório.")
+    if not municipios_selecionados:
+        st.error("Informe ao menos **um município** pelo nome.")
         st.stop()
 
     try:
         regs_bruto = []
-        total_baixado_uf = 0
+        total_por_municipio = {}
 
-        if status_label == "Recebendo Proposta":
-            # UF-only, amostragem por datas + dedup
-            regs_bruto = consultar_proposta_uf_batched(
-                uf=uf_escolhida,
-                dias_retro=int(dias_retro),
-                passo_dias=int(passo_dias),
-            )
-            total_baixado_uf = st.session_state.get("_telemetria_proposta_total_uf", 0)
-        else:
-            # /publicacao exige modalidades
-            cod_modalidades = [x.strip() for x in modalidades_str.split(",") if x.strip()]
-            if not cod_modalidades:
-                st.warning(
-                    "Para **Propostas Encerradas / Encerradas / Todos**, informe **códigos de modalidade** "
-                    "(campo na sidebar). O endpoint /publicacao exige esse parâmetro."
+        # Coleta por município (nome) diretamente na API
+        barra_mun = st.progress(0.0)
+        for i, mun in enumerate(municipios_selecionados, start=1):
+            if status_label == "Recebendo Proposta":
+                lote = consultar_proposta_por_municipio_nome(
+                    municipio_nome=mun,
+                    dias_retro=int(dias_retro),
+                    passo_dias=int(passo_dias),
                 )
-                regs_bruto = []
             else:
-                regs_bruto = consultar_publicacao_por_uf_modalidades(
-                    uf=uf_escolhida,
-                    codigos_modalidade=cod_modalidades,
-                    dias_janela=PUBLICACAO_JANELA_DIAS,
-                )
-                total_baixado_uf = st.session_state.get("_telemetria_publicacao_total_uf", 0)
+                cod_modalidades = [x.strip() for x in modalidades_str.split(",") if x.strip()]
+                if not cod_modalidades:
+                    st.warning(
+                        f"Para **{status_label}** no município '{mun}', informe **códigos de modalidade** "
+                        "(campo na sidebar). O endpoint /publicacao exige esse parâmetro."
+                    )
+                    lote = []
+                else:
+                    lote = consultar_publicacao_por_municipio_nome(
+                        municipio_nome=mun,
+                        codigos_modalidade=cod_modalidades,
+                        dias_janela=PUBLICACAO_JANELA_DIAS,
+                    )
+            regs_bruto.extend(lote)
+            total_por_municipio[mun] = len(lote)
+            barra_mun.progress(min(1.0, i / float(len(municipios_selecionados))))
+            time.sleep(0.02)
+        barra_mun.progress(1.0)
 
-        # Filtros locais: status/palavra -> municípios por NOME
-        regs_status_palavra = filtrar_por_status_palavra(regs_bruto, palavra_chave, status_label)
-        regs_filtrados = filtrar_por_municipios_por_nome(regs_status_palavra, set(municipios_selecionados))
+        # Filtro local: palavra-chave + status (status já tende a vir correto; mantemos por segurança)
+        regs_filtrados = filtrar_por_status_palavra(regs_bruto, palavra_chave, status_label)
 
         df = normalizar_df(regs_filtrados)
 
-        # Auditoria: municípios informados sem retorno
-        sel_norm = set(_mun_key(n) for n in municipios_selecionados or [])
-        presentes = set(_mun_key((r.get("unidadeOrgao") or {}).get("municipioNome")) for r in regs_filtrados)
-        sem_resultado = [m for m in (municipios_selecionados or []) if _mun_key(m) not in presentes]
+        # Auditoria por município
+        sem_resultado = [m for m in municipios_selecionados if total_por_municipio.get(m, 0) == 0]
 
         st.subheader("Resultados")
         hoje_txt = _yyyymmdd(date.today())
         st.caption(
-            f"UF **{uf_escolhida}** • Municípios buscados **{len(municipios_selecionados)}** • "
+            f"Municípios buscados **{len(municipios_selecionados)}** • "
             f"Status **{status_label}** • Palavra-chave **{palavra_chave or '—'}** • Execução **{hoje_txt}**"
         )
 
-        if status_label == "Recebendo Proposta":
-            st.info(
-                f"Amostragem expandida (/proposta): dias retro **{int(dias_retro)}**, "
-                f"passo **{int(passo_dias)}** • Itens recebidos (somas dos lotes UF): **{total_baixado_uf}** • "
-                f"Após deduplicação e filtros: **{len(df)}**."
-            )
-        else:
-            st.info(f"Coleta por UF em /publicacao: itens recebidos **{total_baixado_uf}** • Após filtros: **{len(df)}**.")
+        detalhes = "; ".join([f"{m}: {q}" for m, q in total_por_municipio.items()])
+        st.info(f"Itens recebidos por município (bruto): {detalhes or '—'} • Após filtros: **{len(df)}**.")
 
         if sem_resultado:
             st.warning(f"Sem resultados para: {', '.join(sem_resultado)}")
@@ -452,7 +445,7 @@ if executar:
             st.download_button(
                 label="⬇️ Baixar XLSX",
                 data=xlsx,
-                file_name=f"editais_{uf_escolhida}_{status_label}_{hoje_txt}.xlsx",
+                file_name=f"editais_{status_label}_{hoje_txt}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
@@ -465,8 +458,7 @@ if executar:
 
 else:
     st.info(
-        "Fluxo: 1) buscar por **UF** no PNCP; 2) **filtrar localmente** pelos **nomes** dos municípios informados.\n\n"
-        "- Não usamos códigos/IBGE — apenas o campo **unidadeOrgao.municipioNome** retornado pela própria API.\n"
-        "- 'Recebendo Proposta' usa `/proposta` com **amostragem por datas** (hoje, -7, -14, ...), com **deduplicação**.\n"
-        "- 'Propostas Encerradas / Encerradas / Todos' usam `/publicacao` (datas `yyyyMMdd`) e exigem **códigos de modalidade**."
+        "Fluxo: buscar **direto por NOME do município** na API do PNCP (sem UF e sem códigos), "
+        "tentando automaticamente a variação de parâmetro que o backend aceitar. "
+        "Opcionalmente, use \"Dias retroativos\" para aumentar a abrangência temporal do /proposta."
     )
