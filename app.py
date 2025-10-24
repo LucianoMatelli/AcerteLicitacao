@@ -18,16 +18,20 @@ import streamlit as st
 st.set_page_config(page_title="📑 Acerte Licitações", page_icon="📑", layout="wide")
 
 BASE = "https://pncp.gov.br/api/consulta"
-ENDP_PROPOSTA = f"{BASE}/v1/contratacoes/proposta"       # para “Recebendo Proposta” (não exige modalidade)
-ENDP_PUBLICACAO = f"{BASE}/v1/contratacoes/publicacao"   # exige codigoModalidadeContratacao
+ENDP_PROPOSTA = f"{BASE}/v1/contratacoes/proposta"       # “Recebendo Proposta” (exige dataFinal; não exige modalidade)
+ENDP_PUBLICACAO = f"{BASE}/v1/contratacoes/publicacao"   # Publicações (exige codigoModalidadeContratacao + datas)
 PAGE_SIZE = 50
 
 UFS = ["AC","AL","AM","AP","BA","CE","DF","ES","GO","MA","MG","MS","MT",
        "PA","PB","PE","PI","PR","RJ","RN","RO","RR","RS","SC","SE","SP","TO"]
 
+# Status (labels exatamente como solicitado)
 STATUS_LABELS = ["Recebendo Proposta", "Propostas Encerradas", "Encerradas", "Todos"]
+
+# Janela padrão para publicações (para consulta via /publicacao)
 PUBLICACAO_JANELA_DIAS = 60
 
+# IBGE — fonte oficial
 IBGE_URL = "https://servicodados.ibge.gov.br/api/v1/localidades/municipios?orderBy=nome"
 
 
@@ -43,9 +47,20 @@ def _xlsx_bytes(df: pd.DataFrame, sheet_name: str = "resultados") -> bytes:
             df.to_excel(writer, sheet_name=sheet_name, index=False)
         return buffer.getvalue()
 
+def _yyyymmdd(d: date) -> str:
+    """Formata data no padrão exigido pelo PNCP (yyyyMMdd)."""
+    return d.strftime("%Y%m%d")
+
 def _classificar_status(nome: Optional[str]) -> str:
+    """
+    Bucketiza 'situacaoCompraNome' para a taxonomia exigida:
+    - Recebendo Proposta
+    - Propostas Encerradas
+    - Encerradas
+    - Todos (fallback)
+    """
     s = _normalize_text(nome).lower()
-    if "receb" in s:                          # A receber / Recebendo propostas
+    if "receb" in s:                          # a receber / recebendo propostas
         return "Recebendo Proposta"
     if "julg" in s or "propostas encerradas" in s:
         return "Propostas Encerradas"
@@ -55,36 +70,37 @@ def _classificar_status(nome: Optional[str]) -> str:
 
 
 # =========================
-# IBGE — municípios por UF (com tratamento defensivo)
+# IBGE — municípios por UF (com tratamento defensivo + cache)
 # =========================
 @st.cache_data(show_spinner=False, ttl=60*60*24)
 def carregar_ibge_df() -> pd.DataFrame:
-    """Baixa e normaliza a lista IBGE. Retorna DataFrame com (municipio, uf, codigo_ibge:str)."""
+    """
+    Baixa e normaliza a lista IBGE. Retorna DataFrame com (municipio, uf, codigo_ibge:str).
+    Em caso de indisponibilidade, retorna DF vazio (a UI habilita fallback manual).
+    """
     try:
         r = requests.get(IBGE_URL, timeout=60)
         r.raise_for_status()
         data = r.json()
         rows = []
-        # estrutura esperada: lista de dicts com microrregiao->mesorregiao->UF->sigla
-        for m in data if isinstance(data, list) else []:
-            try:
-                nome = m.get("nome")
-                mic = m.get("microrregiao") or {}
-                meso = mic.get("mesorregiao") or {}
-                ufobj = meso.get("UF") or {}
-                uf = ufobj.get("sigla")
-                codigo = m.get("id")
-                if nome and uf and codigo:
-                    rows.append({"municipio": str(nome), "uf": str(uf), "codigo_ibge": str(codigo)})
-            except Exception:
-                continue
+        if isinstance(data, list):
+            for m in data:
+                try:
+                    nome = m.get("nome")
+                    mic = m.get("microrregiao") or {}
+                    meso = mic.get("mesorregiao") or {}
+                    ufobj = meso.get("UF") or {}
+                    uf = ufobj.get("sigla")
+                    codigo = m.get("id")
+                    if nome and uf and codigo:
+                        rows.append({"municipio": str(nome), "uf": str(uf), "codigo_ibge": str(codigo)})
+                except Exception:
+                    continue
         df = pd.DataFrame(rows)
         if df.empty:
-            raise RuntimeError("Retorno IBGE vazio ou fora do formato esperado.")
-        df = df.sort_values(["uf", "municipio"]).reset_index(drop=True)
-        return df
-    except Exception as e:
-        # fallback: retorna DF vazio; a UI permitirá entrada manual
+            return pd.DataFrame(columns=["municipio", "uf", "codigo_ibge"])
+        return df.sort_values(["uf", "municipio"]).reset_index(drop=True)
+    except Exception:
         return pd.DataFrame(columns=["municipio", "uf", "codigo_ibge"])
 
 @st.cache_data(show_spinner=False, ttl=60*60*24)
@@ -104,13 +120,13 @@ def _iterar_paginas(endpoint: str, params_base: Dict[str, str], sleep_s: float =
         params = dict(params_base)
         params.update({"pagina": pagina, "tamanhoPagina": PAGE_SIZE})
         r = requests.get(endpoint, params=params, timeout=60)
-        # Tratamento mais informativo de erro HTTP
+        # Mensagem de erro mais descritiva, preservando o retorno do PNCP
         try:
             r.raise_for_status()
         except requests.HTTPError as http_err:
             detalhe = ""
             try:
-                detalhe = r.text[:500]
+                detalhe = r.text[:800]
             except Exception:
                 pass
             raise requests.HTTPError(f"{http_err}\nDetalhe PNCP: {detalhe}") from http_err
@@ -132,15 +148,18 @@ def _iterar_paginas(endpoint: str, params_base: Dict[str, str], sleep_s: float =
 # Consultas — conforme Status
 # =========================
 def consultar_proposta_por_uf(uf: str, palavra_chave: str, ibges: List[str]) -> List[dict]:
-    """/proposta (dataFinal = hoje). Não requer modalidade. Usado para 'Recebendo Proposta'."""
-    params_base = {"uf": uf, "dataFinal": date.today().isoformat()}
+    """
+    /proposta (Recebendo Proposta): exige dataFinal no formato yyyyMMdd; não exige modalidade.
+    Filtragem client-side: IBGE e palavra-chave.
+    """
+    params_base = {"uf": uf, "dataFinal": _yyyymmdd(date.today())}
     acumulado = []
     for _, _, dados in _iterar_paginas(ENDP_PROPOSTA, params_base):
-        # filtra município client-side (IBGE)
+        # filtro por município (IBGE)
         if ibges:
             ibge_set = set(ibges)
             dados = [d for d in dados if ((d.get("unidadeOrgao") or {}).get("codigoIbge") in ibge_set)]
-        # filtra palavra-chave client-side
+        # filtro por palavra-chave
         if palavra_chave:
             p = palavra_chave.strip().lower()
             def _hit(d):
@@ -164,18 +183,18 @@ def consultar_publicacao_por_uf_modalidades(
     dias_janela: int = PUBLICACAO_JANELA_DIAS,
 ) -> List[dict]:
     """
-    /publicacao exige codigoModalidadeContratacao.
-    Rodamos 1 chamada por modalidade informada e agregamos.
+    /publicacao: exige codigoModalidadeContratacao + dataInicial/dataFinal (yyyyMMdd).
+    Executa 1 varredura por modalidade informada e agrega.
+    Filtragem client-side: status (bucket), IBGE, palavra-chave.
     """
     if not codigos_modalidade:
-        # Sem modalidade não há como cumprir o contrato da API. Retorna vazio.
         return []
 
     hoje = date.today()
     params_comuns = {
         "uf": uf,
-        "dataInicial": (hoje - timedelta(days=dias_janela)).isoformat(),
-        "dataFinal": hoje.isoformat(),
+        "dataInicial": _yyyymmdd(hoje - timedelta(days=dias_janela)),
+        "dataFinal": _yyyymmdd(hoje),
     }
 
     acumulado = []
@@ -183,14 +202,14 @@ def consultar_publicacao_por_uf_modalidades(
         params = dict(params_comuns)
         params["codigoModalidadeContratacao"] = str(cod)
         for _, _, dados in _iterar_paginas(ENDP_PUBLICACAO, params):
-            # status bucket client-side
+            # status
             if status_label != "Todos":
                 dados = [d for d in dados if _classificar_status(d.get("situacaoCompraNome")) == status_label]
-            # município (IBGE) client-side
+            # IBGE
             if ibges:
                 ibge_set = set(ibges)
                 dados = [d for d in dados if ((d.get("unidadeOrgao") or {}).get("codigoIbge") in ibge_set)]
-            # palavra-chave client-side
+            # palavra-chave
             if palavra_chave:
                 p = palavra_chave.strip().lower()
                 def _hit(d):
@@ -235,7 +254,7 @@ def normalizar_df(regs: List[dict]) -> pd.DataFrame:
 
 
 # =========================
-# Sidebar — conforme seu checklist
+# Sidebar — Filtros (exatamente conforme seu checklist)
 # =========================
 st.sidebar.header("Filtros")
 
@@ -250,24 +269,25 @@ if not uf_escolhida:
 # Municípios (lista IBGE por UF) com fallback manual
 df_ibge_uf = ibge_por_uf(uf_escolhida)
 opcoes_municipios = {f"{r.municipio} / {r.uf}": r.codigo_ibge for _, r in df_ibge_uf.iterrows()} if not df_ibge_uf.empty else {}
+
 if not opcoes_municipios:
-    st.sidebar.warning("Falha ao carregar municípios do IBGE. Insira manualmente (IBGEs separados por vírgula).")
+    st.sidebar.warning("Falha ao carregar municípios do IBGE. Informe IBGEs manualmente (separados por vírgula).")
     ibge_manual = st.sidebar.text_input("IBGEs (manual)", value="")
     codigos_ibge_escolhidos = [x.strip() for x in ibge_manual.split(",") if x.strip()]
 else:
     municipios_labels = st.sidebar.multiselect("Municipios", options=list(opcoes_municipios.keys()))
     codigos_ibge_escolhidos = [opcoes_municipios[l] for l in municipios_labels]
 
-# Status (quatro opções)
+# Status
 status_label = st.sidebar.selectbox("Status", options=STATUS_LABELS, index=0)
 
-# (Novo) Modalidades — necessário quando o Status não for "Recebendo Proposta"
+# Modalidades (obrigatórias para /publicacao — isto é, quando Status != Recebendo Proposta)
 modalidades_str = ""
 if status_label != "Recebendo Proposta":
     modalidades_str = st.sidebar.text_input(
         "Modalidades (códigos PNCP, separados por vírgula)",
         value="",
-        placeholder="Ex.: 5, 6, 7  (se não preencher, só 'Recebendo Proposta' poderá ser executado)"
+        placeholder="Ex.: 5, 6, 23 (Pregão, Concorrência etc.)"
     )
 
 st.sidebar.markdown("---")
@@ -276,6 +296,7 @@ st.sidebar.markdown("---")
 if "pesquisas_salvas" not in st.session_state:
     st.session_state["pesquisas_salvas"] = {}
 nome_pesquisa = st.sidebar.text_input("Salvar pesquisa", value="", placeholder="Ex.: SP — Encerradas — Saúde")
+
 if st.sidebar.button("Salvar pesquisa"):
     st.session_state["pesquisas_salvas"][nome_pesquisa.strip() or f"Pesquisa {len(st.session_state['pesquisas_salvas'])+1}"] = {
         "palavra_chave": palavra_chave,
@@ -318,12 +339,11 @@ if executar:
         if status_label == "Recebendo Proposta":
             regs = consultar_proposta_por_uf(uf_escolhida, palavra_chave, codigos_ibge_escolhidos)
         else:
-            # exige modalidades
             cod_modalidades = [x.strip() for x in modalidades_str.split(",") if x.strip()]
             if not cod_modalidades:
                 st.warning(
-                    "Para executar filtros de **Propostas Encerradas / Encerradas / Todos**, "
-                    "informe **códigos de modalidade** na sidebar. Sem isso, a API /publicacao retorna erro."
+                    "Para **Propostas Encerradas / Encerradas / Todos**, informe **códigos de modalidade** "
+                    "(campo na sidebar). O endpoint /publicacao exige esse parâmetro."
                 )
                 regs = []
             else:
@@ -338,9 +358,11 @@ if executar:
         df = normalizar_df(regs)
 
         st.subheader("Resultados")
+        hoje = date.today()
         st.caption(
             f"UF **{uf_escolhida}** • Municípios selecionados **{len(codigos_ibge_escolhidos)}** • "
-            f"Status **{status_label}** • Palavra-chave **{palavra_chave or '—'}**"
+            f"Status **{status_label}** • Palavra-chave **{palavra_chave or '—'}** • "
+            f"Execução **{_yyyymmdd(hoje)}**"
         )
 
         if df.empty:
@@ -351,7 +373,7 @@ if executar:
             st.download_button(
                 label="⬇️ Baixar XLSX",
                 data=xlsx,
-                file_name=f"editais_{uf_escolhida}_{status_label}_{date.today().isoformat()}.xlsx",
+                file_name=f"editais_{uf_escolhida}_{status_label}_{_yyyymmdd(hoje)}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
@@ -364,7 +386,7 @@ else:
     st.info(
         "Configure os filtros na **sidebar** e clique em **Executar Pesquisa**.\n\n"
         "- **Estado (UF)** é obrigatório.\n"
-        "- **Municípios** vêm do **IBGE**; em caso de indisponibilidade, informe os **IBGEs manualmente**.\n"
-        "- **Status 'Recebendo Proposta'** usa a API `/proposta` (não exige modalidade).\n"
-        "- Para **Propostas Encerradas / Encerradas / Todos**, informe **códigos de modalidade** (API `/publicacao`)."
+        "- **Municípios** vêm do **IBGE** (fallback manual disponível em caso de indisponibilidade).\n"
+        "- **'Recebendo Proposta'** usa `/proposta` com `dataFinal=yyyyMMdd`.\n"
+        "- **'Propostas Encerradas' / 'Encerradas' / 'Todos'** usam `/publicacao` e exigem **códigos de modalidade**."
     )
