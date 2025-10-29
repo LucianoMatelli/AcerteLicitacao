@@ -265,18 +265,21 @@ def _persist_saved_searches(d: Dict[str, Dict]):
 
 def _ensure_session_state():
     if "selected_municipios" not in st.session_state:
-        st.session_state.selected_municipios = []  # list[{"codigo_pncp","nome","uf"}]
+        st.session_state.selected_municipios = []
     if "saved_searches" not in st.session_state:
         st.session_state.saved_searches = _load_saved_searches()
     if "sidebar_inputs" not in st.session_state:
         st.session_state.sidebar_inputs = {
             "palavra_chave": "",
-            "status_label": STATUS_LABELS[0],  # default solicitado
+            "status_label": STATUS_LABELS[0],
             "uf": "Todos",
             "save_name": "",
             "selected_saved": None,
         }
-
+    if "card_page" not in st.session_state:
+        st.session_state.card_page = 1
+    if "page_size_cards" not in st.session_state:
+        st.session_state.page_size_cards = 10
 def _add_municipio_by_name(nome_municipio: str, uf: Optional[str], pncp_df: pd.DataFrame) -> None:
     if not nome_municipio:
         return
@@ -425,72 +428,59 @@ def main():
     st.caption("Fluxo funcional: /api/search (PNCP) + seleção IBGE→PNCP. Máx. 25 municípios.")
 
     st.markdown('''
-    <style>
-    /* Sidebar: subtle elegant blue */
-    section[data-testid="stSidebar"] {
-        background: #eaf2ff !important; /* suave, mais claro */
-        border-right: 1px solid #d6e4ff;
-    }
-    /* Text and labels readable (dark navy) */
-    section[data-testid="stSidebar"] * {
-        color: #0f2240 !important;
-    }
-    /* Inputs inside sidebar: white bg + dark text */
-    section[data-testid="stSidebar"] input,
-    section[data-testid="stSidebar"] textarea,
-    section[data-testid="stSidebar"] select,
-    section[data-testid="stSidebar"] .stTextInput input,
-    section[data-testid="stSidebar"] .stTextArea textarea,
-    section[data-testid="stSidebar"] .stSelectbox > div > div,
-    section[data-testid="stSidebar"] .stMultiSelect > div > div {
-        background: #ffffff !important;
-        color: #0f2240 !important;
-        border: 1px solid #b7c6e6 !important;
-        box-shadow: none !important;
-    }
-    section[data-testid="stSidebar"] input::placeholder,
-    section[data-testid="stSidebar"] textarea::placeholder {
-        color: #556080 !important;
-        opacity: 0.85;
-    }
-    /* Radio/checkbox accents */
-    section[data-testid="stSidebar"] .stRadio div[role="radiogroup"] label p,
-    section[data-testid="stSidebar"] .stCheckbox label p {
-        color: #0f2240 !important;
-    }
+<style>
+/* Subtle sidebar theme */
+section[data-testid="stSidebar"] {
+  background: #eef4ff !important;
+  border-right: 1px solid #dfe8ff;
+}
+section[data-testid="stSidebar"] * {
+  color: #0f2240 !important;
+}
+/* Inputs readable */
+section[data-testid="stSidebar"] input,
+section[data-testid="stSidebar"] textarea {
+  background: #ffffff !important;
+  color: #0f2240 !important;
+  border: 1px solid #b7c6e6 !important;
+  box-shadow: none !important;
+}
+section[data-testid="stSidebar"] input::placeholder,
+section[data-testid="stSidebar"] textarea::placeholder {
+  color: #5a6a8a !important;
+  opacity: .9;
+}
 
-    /* Main area slightly contrasted */
-    div.block-container {
-        background: #f9fbff;
-        padding-top: 1rem;
-        padding-bottom: 2rem;
-    }
+/* Main header & container spacing: avoid overlap */
+header[data-testid="stHeader"] {
+  background: transparent !important;
+  box-shadow: none !important;
+  height: 3rem;
+}
+div.block-container {
+  padding-top: 2.25rem; /* space under the Streamlit header */
+  background: #f9fbff;
+  padding-bottom: 2rem;
+}
 
-    /* Cards: subtler blue and refined borders */
-    .ac-card {
-        background: #f7fbff;
-        border: 1.5px solid #cfdcf6;
-        border-radius: 18px;
-        padding: 1rem 1.2rem;
-        margin-bottom: 0.9rem;
-        box-shadow: 0 1px 5px rgba(16, 38, 95, 0.05);
-    }
-    .ac-card h3 {
-        margin-top: 0;
-        margin-bottom: 0.25rem;
-        font-size: 1.06rem;
-        color: #0b1b36;
-    }
-    .ac-muted {
-        color: #44516a;
-        font-size: 0.92rem;
-    }
-    /* Link button inside card */
-    .ac-card a {
-        color: #0b3b8a;
-        border-color: #96b3e9 !important;
-    }
-    </style>
+/* Cards */
+.ac-card {
+  background: #f7fbff;
+  border: 1.5px solid #cfdcf6;
+  border-radius: 18px;
+  padding: 1rem 1.2rem;
+  margin-bottom: 0.9rem;
+  box-shadow: 0 1px 5px rgba(16, 38, 95, 0.05);
+}
+.ac-card h3 {
+  margin-top: 0;
+  margin-bottom: 0.25rem;
+  font-size: 1.06rem;
+  color: #0b1b36;
+}
+.ac-muted { color: #44516a; font-size: 0.92rem; }
+.ac-card a { color: #0b3b8a; border-color: #96b3e9 !important; }
+</style>
 ''', unsafe_allow_html=True)
 
     # Estado
@@ -570,106 +560,119 @@ def main():
             df = df[[c for c in desired_order if c in df.columns]]
 
         
-        st.subheader(f"Resultados ({len(df)})")
-        if df.empty:
-            st.info("Nenhum resultado encontrado com os critérios atuais.")
-        else:
-            # Ordenação correta por data de publicação (desc)
-            try:
-                df["_pub_dt"] = pd.to_datetime(df["_pub_raw"], errors="coerce", utc=False)
-            except Exception:
-                df["_pub_dt"] = pd.NaT
-            df = df.sort_values("_pub_dt", ascending=False, na_position="last").reset_index(drop=True)
+        
+    st.subheader(f"Resultados ({len(df)})")
+    if df.empty:
+        st.info("Nenhum resultado encontrado com os critérios atuais.")
+    else:
+        # Ordenação correta por data de publicação (desc)
+        try:
+            df["_pub_dt"] = pd.to_datetime(df["_pub_raw"], errors="coerce", utc=False)
+        except Exception:
+            df["_pub_dt"] = pd.NaT
+        df = df.sort_values("_pub_dt", ascending=False, na_position="last").reset_index(drop=True)
 
-            # Paginação de cards
-            if "card_page" not in st.session_state:
-                st.session_state.card_page = 1
-            page_size = st.selectbox("Itens por página", [10, 20, 50], index=0, key="page_size_cards")
-            total_items = len(df)
-            total_pages = max(1, (total_items + page_size - 1) // page_size)
-            col_a, col_b, col_c = st.columns([1, 2, 1])
-            with col_a:
-                prev_clicked = st.button("◀ Anterior", disabled=(st.session_state.card_page <= 1))
-            with col_c:
-                next_clicked = st.button("Próxima ▶", disabled=(st.session_state.card_page >= total_pages))
-            if prev_clicked:
-                st.session_state.card_page = max(1, st.session_state.card_page - 1)
-            if next_clicked:
-                st.session_state.card_page = min(total_pages, st.session_state.card_page + 1)
-            with col_b:
-                st.markdown(f"**Página {st.session_state.card_page} de {total_pages}**")
+        # Persist page size and compute total pages
+        st.session_state.page_size_cards = st.selectbox(
+            "Itens por página", [10, 20, 50],
+            index=[10,20,50].index(st.session_state.page_size_cards) if st.session_state.page_size_cards in [10,20,50] else 0,
+            key="page_size_cards"
+        )
+        total_items = len(df)
+        total_pages = max(1, (total_items + st.session_state.page_size_cards - 1) // st.session_state.page_size_cards)
 
-            start = (st.session_state.card_page - 1) * page_size
-            end = start + page_size
-            page_df = df.iloc[start:end].copy()
+        # Top pagination controls
+        col_a, col_b, col_c = st.columns([1, 2, 1])
+        with col_a:
+            prev_clicked = st.button("◀ Anterior", key="prev_top", disabled=(st.session_state.card_page <= 1))
+        with col_c:
+            next_clicked = st.button("Próxima ▶", key="next_top", disabled=(st.session_state.card_page >= total_pages))
 
-            # Render cards (styled)
-            for _, row in page_df.iterrows():
-                link = row.get('Link para o edital','')
-                titulo = row.get('Título') or '(Sem título)'
-                cidade = row.get('Cidade','')
-                uf = row.get('UF','')
-                pub = row.get('Publicação','')
-                fim = row.get('Fim do envio de proposta','')
-                objeto = row.get('Objeto','')
-                modalidade = row.get('Modalidade','')
-                tipo = row.get('Tipo','')
-                orgao = row.get('Orgão','')
-                proc = row.get('numero_processo','')
+        # Update page then clamp
+        if prev_clicked:
+            st.session_state.card_page = max(1, st.session_state.card_page - 1)
+        if next_clicked:
+            st.session_state.card_page = min(total_pages, st.session_state.card_page + 1)
+        if st.session_state.card_page > total_pages:
+            st.session_state.card_page = total_pages
 
-                html = f'''
-                <div class="ac-card">
-                    <h3>{titulo}</h3>
-                    <div class="ac-muted">
-                        <strong>Cidade/UF:</strong> {cidade} / {uf} &nbsp;|&nbsp;
-                        <strong>Publicação:</strong> {pub} &nbsp;|&nbsp;
-                        <strong>Fim do envio:</strong> {fim}
-                    </div>
-                    <div style="margin-top:0.5rem;"><strong>Objeto:</strong> {objeto}</div>
-                    <div style="display:flex; gap:1rem; margin-top:0.5rem; flex-wrap:wrap;">
-                        <div><strong>Modalidade:</strong> {modalidade}</div>
-                        <div><strong>Tipo:</strong> {tipo}</div>
-                        <div><strong>Órgão:</strong> {orgao}</div>
-                    </div>
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.6rem;">
-                        <div class="ac-muted">Processo: {proc}</div>
-                        {f'<a href="{link}" target="_blank" style="text-decoration:none; padding:0.45rem 0.8rem; border-radius:10px; border:1px solid #96b3e9;">Abrir edital</a>' if isinstance(link, str) and link else ''}
-                    </div>
+        # Slice AFTER updating page and page_size
+        start = (st.session_state.card_page - 1) * st.session_state.page_size_cards
+        end = start + st.session_state.page_size_cards
+        with col_b:
+            st.markdown(f"**Página {st.session_state.card_page} de {total_pages}**")
+
+        page_df = df.iloc[start:end].copy()
+
+        # Render cards (styled)
+        for _, row in page_df.iterrows():
+            link = row.get('Link para o edital','')
+            titulo = row.get('Título') or '(Sem título)'
+            cidade = row.get('Cidade','')
+            uf = row.get('UF','')
+            pub = row.get('Publicação','')
+            fim = row.get('Fim do envio de proposta','')
+            objeto = row.get('Objeto','')
+            modalidade = row.get('Modalidade','')
+            tipo = row.get('Tipo','')
+            orgao = row.get('Orgão','')
+            proc = row.get('numero_processo','')
+
+            html = f'''
+            <div class="ac-card">
+                <h3>{titulo}</h3>
+                <div class="ac-muted">
+                    <strong>Cidade/UF:</strong> {cidade} / {uf} &nbsp;|&nbsp;
+                    <strong>Publicação:</strong> {pub} &nbsp;|&nbsp;
+                    <strong>Fim do envio:</strong> {fim}
                 </div>
-                '''
-                st.markdown(html, unsafe_allow_html=True)
+                <div style="margin-top:0.5rem;"><strong>Objeto:</strong> {objeto}</div>
+                <div style="display:flex; gap:1rem; margin-top:0.5rem; flex-wrap:wrap;">
+                    <div><strong>Modalidade:</strong> {modalidade}</div>
+                    <div><strong>Tipo:</strong> {tipo}</div>
+                    <div><strong>Órgão:</strong> {orgao}</div>
+                </div>
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.6rem;">
+                    <div class="ac-muted">Processo: {proc}</div>
+                    {f'<a href="{link}" target="_blank" style="text-decoration:none; padding:0.45rem 0.8rem; border-radius:10px; border:1px solid #96b3e9;">Abrir edital</a>' if isinstance(link, str) and link else ''}
+                </div>
+            </div>
+            '''
+            st.markdown(html, unsafe_allow_html=True)
 
-            # Controles de paginação no rodapé
-            col_a2, col_b2, col_c2 = st.columns([1, 2, 1])
-            with col_a2:
-                prev_clicked2 = st.button("◀ Anterior", key="prev_bottom", disabled=(st.session_state.card_page <= 1))
-            with col_c2:
-                next_clicked2 = st.button("Próxima ▶", key="next_bottom", disabled=(st.session_state.card_page >= total_pages))
-            if prev_clicked2:
-                st.session_state.card_page = max(1, st.session_state.card_page - 1)
-            if next_clicked2:
-                st.session_state.card_page = min(total_pages, st.session_state.card_page + 1)
-            with col_b2:
-                st.markdown(f"**Página {st.session_state.card_page} de {total_pages}**")
+        # Bottom pagination controls
+        col_a2, col_b2, col_c2 = st.columns([1, 2, 1])
+        with col_a2:
+            prev_clicked2 = st.button("◀ Anterior", key="prev_bottom", disabled=(st.session_state.card_page <= 1))
+        with col_c2:
+            next_clicked2 = st.button("Próxima ▶", key="next_bottom", disabled=(st.session_state.card_page >= total_pages))
+        if prev_clicked2:
+            st.session_state.card_page = max(1, st.session_state.card_page - 1)
+        if next_clicked2:
+            st.session_state.card_page = min(total_pages, st.session_state.card_page + 1)
+        if st.session_state.card_page > total_pages:
+            st.session_state.card_page = total_pages
+        with col_b2:
+            st.markdown(f"**Página {st.session_state.card_page} de {total_pages}**")
 
-            st.divider()
+        st.divider()
 
-            # Download XLSX (sem colunas auxiliares)
-            export_df = df.drop(columns=[c for c in ["_pub_raw", "_fim_raw", "_pub_dt"] if c in df.columns]).copy()
-            xlsx_buf = io.BytesIO()
-            with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as wr:
-                export_df.to_excel(wr, index=False, sheet_name="PNCP")
-            xlsx_bytes = xlsx_buf.getvalue()
+        # Download XLSX (sem colunas auxiliares)
+        export_df = df.drop(columns=[c for c in ["_pub_raw", "_fim_raw", "_pub_dt"] if c in df.columns]).copy()
+        xlsx_buf = io.BytesIO()
+        with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as wr:
+            export_df.to_excel(wr, index=False, sheet_name="PNCP")
+        xlsx_bytes = xlsx_buf.getvalue()
 
-            st.markdown("### ⬇️ Baixar planilha")
-            st.download_button(
-                "Baixar XLSX",
-                data=xlsx_bytes,
-                file_name=f"pncp_resultados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                type="primary",
-            )
-
+        st.markdown("### ⬇️ Baixar planilha")
+        st.download_button(
+            "Baixar XLSX",
+            data=xlsx_bytes,
+            file_name=f"pncp_resultados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            type="primary",
+        )
+    
 if __name__ == "__main__":
     main()
