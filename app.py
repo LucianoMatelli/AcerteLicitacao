@@ -169,46 +169,30 @@ def load_ibge_catalog() -> Optional[pd.DataFrame]:
 # ==============================
 # Consulta legado /api/search
 # ==============================
-def _compose_param_sets(query: str, status_values: List[str], codigo_municipio_pncp: str, page: int) -> List[Dict]:
-    """
-    Gera combinações de parâmetros historicamente aceitas pelo endpoint /api/search.
-    Mantemos 'pagina' e 'tamanhoPagina' por serem comuns em docs antigos;
-    e variações de 'term'/'q' e 'municipioId'/'municipioCodigo'.
-    """
-    base = {
+def _compose_param_sets(query: str, codigo_municipio_pncp: str, page: int):
+    # Baseline funcional: apenas parâmetros mínimos exigidos pelo /api/search
+    return [{
         "term": (query or ""),
-        "q": (query or ""),
         "pagina": page,
-        "page": page,
         "tamanhoPagina": TAM_PAGINA_FIXO,
-        "size": TAM_PAGINA_FIXO,
-        # status (flexível): alguns ambientes ignoram; ainda assim enviamos as opções
-        "status": ",".join(status_values) if status_values else "",
-        "situacao": ",".join(status_values) if status_values else "",
-        # município PNCP (não IBGE)
         "municipioId": codigo_municipio_pncp,
-        "municipioCodigo": codigo_municipio_pncp,
-        "codigoMunicipio": codigo_municipio_pncp,
-    }
-
-    # Priorização: combinações que mais vimos funcionar em versões anteriores
-    combos = [
-        ["term", "pagina", "tamanhoPagina", "municipioId", "status"],
-        ["term", "pagina", "tamanhoPagina", "municipioCodigo", "status"],
-        ["term", "pagina", "tamanhoPagina", "codigoMunicipio", "status"],
-        ["q", "page", "size", "municipioId", "status"],
-        ["q", "page", "size", "municipioCodigo", "status"],
-        ["q", "page", "size", "codigoMunicipio", "status"],
-    ]
-
-    out = []
-    for keys in combos:
-        d = {k: base[k] for k in keys if base.get(k, "") != ""}
-        out.append(d)
-    return out
-
+    }]
 
 def _fetch_search_page(query: str, status_label: str, codigo_municipio_pncp: str, page: int) -> Dict:
+    params = _compose_param_sets(query, codigo_municipio_pncp, page)[0]
+    resp = requests.get(PNCP_SEARCH_URL, params=params, timeout=30)
+    if resp.status_code != 200:
+        raise RuntimeError(f"{resp.status_code} {resp.reason} @ {PNCP_SEARCH_URL} {params}")
+    data = resp.json()
+    # Aceita dict com chaves conhecidas ou lista
+    if isinstance(data, dict):
+        if any(k in data for k in ["content", "items", "resultados", "results"]):
+            return {"ok": True, "params": params, "data": data}
+    elif isinstance(data, list):
+        return {"ok": True, "params": params, "data": data}
+    # Payload inesperado
+    return {"ok": True, "params": params, "data": data}
+(query: str, status_label: str, codigo_municipio_pncp: str, page: int) -> Dict:
     """
     Tenta as combinações de parâmetros até obter 200 OK e payload com lista.
     """
@@ -331,7 +315,7 @@ def _ensure_session_state():
     if "sidebar_inputs" not in st.session_state:
         st.session_state.sidebar_inputs = {
             "palavra_chave": "",
-            "status": STATUS_LABELS[-1],  # "Todos"
+            "status": STATUS_LABELS[0],  # "Todos"
             "uf": "Todos",
             "save_name": "",
             "selected_saved": None,
