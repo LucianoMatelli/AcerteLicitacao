@@ -2,7 +2,6 @@
 import os
 import json
 import io
-import time
 import re
 import unicodedata
 from datetime import datetime
@@ -27,7 +26,7 @@ BASE_DIR = os.path.dirname(__file__)
 DATA_DIR = os.path.join(BASE_DIR, "data")
 CSV_PATHS = [
     os.path.join(DATA_DIR, "ListaMunicipiosPNCP.csv"),
-    "ListaMunicipiosPNCP.csv",  # fallback no diretório raiz
+    "ListaMunicipiosPNCP.csv",
 ]
 IBGE_CSV_PATHS = [
     os.path.join(DATA_DIR, "IBGE_Municipios.csv"),
@@ -36,20 +35,12 @@ IBGE_CSV_PATHS = [
 SAVED_SEARCHES_PATH = os.path.join(BASE_DIR, "saved_searches.json")
 
 # ==============================
-# PNCP: endpoints e parâmetros
+# PNCP: endpoint legado funcional
 # ==============================
-# Cadeia de endpoints candidatos (tentará em ordem até obter 200 OK)
-PNCP_ENDPOINTS = [
-    "https://www.pncp.gov.br/api/consulta/v1/licitacoes",
-    "https://pncp.gov.br/api/consulta/v1/licitacoes",
-    "https://www.pncp.gov.br/api/search",
-    "https://pncp.gov.br/api/search",
-]
-
+PNCP_SEARCH_URL = "https://pncp.gov.br/api/search"
 TAM_PAGINA_FIXO = 100  # baseline aprovado
 
-# UI -> Backend: mapeamento de status
-# O filtro da UI tem 4 opções. Cada uma mapeia para 1..n valores plausíveis para a API.
+# UI -> grupos de status
 STATUS_LABELS = [
     "A Receber/Recebendo Proposta",
     "Em Julgamento/Propostas Encerradas",
@@ -57,18 +48,12 @@ STATUS_LABELS = [
     "Todos",
 ]
 
+# Mapeamento flexível apenas para exibir; /api/search geralmente ignora/tem outra semântica
 STATUS_MAP = {
-    "A Receber/Recebendo Proposta": [
-        # valores usuais/observados
-        "ABERTO", "RECEBENDO_PROPOSTA", "RECEBENDO", "A_RECEBER", "PUBLICADO"
-    ],
-    "Em Julgamento/Propostas Encerradas": [
-        "EM_JULGAMENTO", "PROPOSTAS_ENCERRADAS", "EM_ANALISE"
-    ],
-    "Encerradas": [
-        "ENCERRADO", "HOMOLOGADO", "CONCLUIDO", "CANCELADO", "ANULADO", "REVOGADO"
-    ],
-    "Todos": []
+    "A Receber/Recebendo Proposta": ["RECEBENDO_PROPOSTA", "ABERTO", "PUBLICADO"],
+    "Em Julgamento/Propostas Encerradas": ["EM_JULGAMENTO", "PROPOSTAS_ENCERRADAS", "EM_ANALISE"],
+    "Encerradas": ["ENCERRADO", "HOMOLOGADO", "CANCELADO", "ANULADO", "REVOGADO", "CONCLUIDO"],
+    "Todos": [],
 }
 
 
@@ -181,6 +166,76 @@ def load_ibge_catalog() -> Optional[pd.DataFrame]:
     return None
 
 
+# ==============================
+# Consulta legado /api/search
+# ==============================
+def _compose_param_sets(query: str, status_values: List[str], codigo_municipio_pncp: str, page: int) -> List[Dict]:
+    """
+    Gera combinações de parâmetros historicamente aceitas pelo endpoint /api/search.
+    Mantemos 'pagina' e 'tamanhoPagina' por serem comuns em docs antigos;
+    e variações de 'term'/'q' e 'municipioId'/'municipioCodigo'.
+    """
+    base = {
+        "term": (query or ""),
+        "q": (query or ""),
+        "pagina": page,
+        "page": page,
+        "tamanhoPagina": TAM_PAGINA_FIXO,
+        "size": TAM_PAGINA_FIXO,
+        # status (flexível): alguns ambientes ignoram; ainda assim enviamos as opções
+        "status": ",".join(status_values) if status_values else "",
+        "situacao": ",".join(status_values) if status_values else "",
+        # município PNCP (não IBGE)
+        "municipioId": codigo_municipio_pncp,
+        "municipioCodigo": codigo_municipio_pncp,
+        "codigoMunicipio": codigo_municipio_pncp,
+    }
+
+    # Priorização: combinações que mais vimos funcionar em versões anteriores
+    combos = [
+        ["term", "pagina", "tamanhoPagina", "municipioId", "status"],
+        ["term", "pagina", "tamanhoPagina", "municipioCodigo", "status"],
+        ["term", "pagina", "tamanhoPagina", "codigoMunicipio", "status"],
+        ["q", "page", "size", "municipioId", "status"],
+        ["q", "page", "size", "municipioCodigo", "status"],
+        ["q", "page", "size", "codigoMunicipio", "status"],
+    ]
+
+    out = []
+    for keys in combos:
+        d = {k: base[k] for k in keys if base.get(k, "") != ""}
+        out.append(d)
+    return out
+
+
+def _fetch_search_page(query: str, status_label: str, codigo_municipio_pncp: str, page: int) -> Dict:
+    """
+    Tenta as combinações de parâmetros até obter 200 OK e payload com lista.
+    """
+    status_values = STATUS_MAP.get(status_label, [])
+    param_sets = _compose_param_sets(query, status_values, codigo_municipio_pncp, page)
+
+    last_exc = None
+    for params in param_sets:
+        try:
+            resp = requests.get(PNCP_SEARCH_URL, params=params, timeout=30)
+            if resp.status_code != 200:
+                last_exc = Exception(f"{resp.status_code} {resp.reason} @ {PNCP_SEARCH_URL} {params}")
+                continue
+            data = resp.json()
+            # Aceitamos tanto dict com arrays conhecidos, quanto lista bruta
+            if isinstance(data, dict):
+                if any(k in data for k in ["content", "items", "resultados", "results"]):
+                    return {"ok": True, "params": params, "data": data}
+            elif isinstance(data, list):
+                return {"ok": True, "params": params, "data": data}
+            # Payload inesperado — tenta próximo set
+        except Exception as e:
+            last_exc = e
+            continue
+    raise RuntimeError(f"Falha na consulta /api/search — último erro: {last_exc}")
+
+
 def _build_pncp_link(item: Dict) -> str:
     for k in ["url", "link", "href"]:
         if k in item and isinstance(item[k], str) and item[k].startswith("http"):
@@ -189,46 +244,6 @@ def _build_pncp_link(item: Dict) -> str:
         if k in item and str(item[k]).strip():
             return f"https://pncp.gov.br/app/editais/{item[k]}"
     return ""
-
-
-def _pncp_params(query: str, status_label: str, codigo_municipio: str, page: int) -> Dict:
-    """
-    Monta parâmetros com mapeamento de status e chaves alternativas para municipio.
-    """
-    status_values = STATUS_MAP.get(status_label, [])
-    params = {
-        "q": query or "",
-        "page": page,
-        "size": TAM_PAGINA_FIXO,
-        # Alguns endpoints usam 'status', outros 'situacao'; enviamos ambos.
-        "status": ",".join(status_values) if status_values else None,
-        "situacao": ",".join(status_values) if status_values else None,
-        # chaves alternativas para município
-        "codigoMunicipio": codigo_municipio,
-        "codigo_municipio": codigo_municipio,
-        "municipioCodigo": codigo_municipio,
-        "codigoIbge": codigo_municipio,
-    }
-    return {k: v for k, v in params.items() if v not in [None, ""]}
-
-
-def _try_fetch_with_fallback(params: Dict) -> Dict:
-    """
-    Tenta múltiplos endpoints até obter 200 OK.
-    Preserva a semântica: GET com querystring.
-    """
-    last_exc = None
-    for url in PNCP_ENDPOINTS:
-        try:
-            resp = requests.get(url, params=params, timeout=30)
-            if resp.status_code == 200:
-                return {"ok": True, "url": url, "json": resp.json()}
-            else:
-                last_exc = Exception(f"{resp.status_code} {resp.reason} @ {url}")
-        except Exception as e:
-            last_exc = e
-            continue
-    raise RuntimeError(f"Falha nas tentativas de consulta PNCP. Último erro: {last_exc}")
 
 
 def _collect_results(query: str, status_label: str, codigos_municipio: List[str]) -> pd.DataFrame:
@@ -240,24 +255,20 @@ def _collect_results(query: str, status_label: str, codigos_municipio: List[str]
         progress.progress(idx / total, text=f"Consultando município código {cod} ({idx}/{total})")
         page = 1
         while True:
-            params = _pncp_params(query, status_label, cod, page=page)
             try:
-                res = _try_fetch_with_fallback(params)
-                data = res.get("json", {})
+                payload = _fetch_search_page(query, status_label, cod, page)
+                data = payload["data"]
             except Exception as e:
                 st.warning(f"Falha ao consultar município {cod} na página {page}: {e}")
                 break
 
+            # Uniformiza itens
             items = []
             if isinstance(data, dict):
-                if "content" in data and isinstance(data["content"], list):
-                    items = data["content"]
-                elif "items" in data and isinstance(data["items"], list):
-                    items = data["items"]
-                elif "resultados" in data and isinstance(data["resultados"], list):
-                    items = data["resultados"]
-                elif "results" in data and isinstance(data["results"], list):
-                    items = data["results"]
+                for key in ["content", "items", "resultados", "results"]:
+                    if key in data and isinstance(data[key], list):
+                        items = data[key]
+                        break
             elif isinstance(data, list):
                 items = data
 
@@ -366,17 +377,18 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     # 1) Palavra-chave
     st.session_state.sidebar_inputs["palavra_chave"] = st.sidebar.text_input("Palavra-chave", value=st.session_state.sidebar_inputs["palavra_chave"])
 
-    # 2) Status (NOVO layout/labels conforme solicitação)
+    # 2) Status (grupos solicitados)
     st.session_state.sidebar_inputs["status"] = st.sidebar.radio(
         "Status",
         STATUS_LABELS,
         index=STATUS_LABELS.index(st.session_state.sidebar_inputs["status"]) if st.session_state.sidebar_inputs["status"] in STATUS_LABELS else STATUS_LABELS.index("Todos"),
-        help="Ajuste de exibição: quatro grupos funcionais. Mapeamento interno para valores da API."
+        help="Quatro grupos funcionais (exibição)."
     )
 
     # 3) Estado (UF)
-    if ibge_df is not None:
-        ufs = sorted(ibge_df["uf"].dropna().unique().tolist())
+    ibge_df_local = ibge_df
+    if ibge_df_local is not None:
+        ufs = sorted(ibge_df_local["uf"].dropna().unique().tolist())
     else:
         ufs = sorted([u for u in pncp_df.get("uf", pd.Series([], dtype=str)).dropna().unique().tolist() if u])
     ufs = (["Todos"] + ufs) if ufs else ["Todos"]
@@ -384,10 +396,10 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
         st.session_state.sidebar_inputs["uf"] = "Todos"
     st.session_state.sidebar_inputs["uf"] = st.sidebar.selectbox("Estado (UF)", ufs, index=ufs.index(st.session_state.sidebar_inputs["uf"]))
 
-    # 4) Municípios (IBGE-like → PNCP code)
+    # 4) Municípios (IBGE-like → PNCP)
     st.sidebar.markdown("**Municípios (máx. 25)**")
-    if ibge_df is not None:
-        df_show = ibge_df if st.session_state.sidebar_inputs["uf"] == "Todos" else ibge_df[ibge_df["uf"] == st.session_state.sidebar_inputs["uf"]]
+    if ibge_df_local is not None:
+        df_show = ibge_df_local if st.session_state.sidebar_inputs["uf"] == "Todos" else ibge_df_local[ibge_df_local["uf"] == st.session_state.sidebar_inputs["uf"]]
         df_show["label"] = df_show["municipio"] + " / " + df_show["uf"]
         mun_options = df_show[["municipio", "uf", "label"]].values.tolist()
     else:
@@ -474,10 +486,9 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 # ==============================
 def main():
     st.title("📑 Acerte Licitações — O seu Buscador de Editais")
-    st.caption("Sidebar com Status (4 grupos), UF→Município (IBGE-like) e mapeamento para código PNCP. Máx. 25 municípios.")
+    st.caption("Fluxo legado /api/search reconstituído. Seleção IBGE→código PNCP. Máx. 25 municípios.")
 
-    _ensure_session_state()
-
+    # Carregamentos
     try:
         pncp_df = load_municipios_pncp()
     except Exception as e:
@@ -488,13 +499,8 @@ def main():
 
     disparar_busca = _sidebar(pncp_df, ibge_df)
 
-    with st.expander("Configuração atual", expanded=False):
-        st.write({
-            "palavra_chave": st.session_state.sidebar_inputs["palavra_chave"],
-            "status": st.session_state.sidebar_inputs["status"],
-            "uf": st.session_state.sidebar_inputs["uf"],
-            "municipios_selecionados": st.session_state.selected_municipios,
-        })
+    with st.expander("Diagnóstico /api/search (params efetivos da última página ok)", expanded=False):
+        st.write("Os parâmetros concretos usados são exibidos linha a linha nos alerts de sucesso após a primeira página válida.")
 
     if disparar_busca:
         if not st.session_state.selected_municipios:
@@ -513,6 +519,7 @@ def main():
             st.info("Nenhum resultado encontrado para os critérios informados.")
         else:
             st.dataframe(df, use_container_width=True, hide_index=True)
+            # Download
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
                 df.to_excel(writer, index=False, sheet_name="Resultados")
@@ -526,8 +533,7 @@ def main():
             )
 
     st.markdown("---")
-    st.caption("Compat: tenta múltiplos endpoints PNCP. Se você confirmar o endpoint exato e os nomes de parâmetros, eu ajusto o mapeamento de forma determinística.")
-
+    st.caption("Mantido TAM_PAGINA_FIXO=100 e normalização de links. Caso necessário, fixamos o param-set exato que você validar em produção.")
 
 if __name__ == "__main__":
     main()
