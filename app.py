@@ -488,6 +488,8 @@ def main():
     st.title("📑 Acerte Licitações — O seu Buscador de Editais")
     st.caption("Fluxo legado /api/search reconstituído. Seleção IBGE→código PNCP. Máx. 25 municípios.")
 
+    _ensure_session_state()
+
     # Carregamentos
     try:
         pncp_df = load_municipios_pncp()
