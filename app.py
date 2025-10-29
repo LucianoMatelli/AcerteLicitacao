@@ -569,14 +569,100 @@ def main():
         if not df.empty:
             df = df[[c for c in desired_order if c in df.columns]]
 
+        
         st.subheader(f"Resultados ({len(df)})")
         if df.empty:
             st.info("Nenhum resultado encontrado com os critérios atuais.")
         else:
-            st.write('')
-st.markdown('> Exibição em cards ativada.')
-st.markdown('### ⬇️ Baixar planilha')
-st.download_button(
+            # Ordenação correta por data de publicação (desc)
+            try:
+                df["_pub_dt"] = pd.to_datetime(df["_pub_raw"], errors="coerce", utc=False)
+            except Exception:
+                df["_pub_dt"] = pd.NaT
+            df = df.sort_values("_pub_dt", ascending=False, na_position="last").reset_index(drop=True)
+
+            # Paginação de cards
+            if "card_page" not in st.session_state:
+                st.session_state.card_page = 1
+            page_size = st.selectbox("Itens por página", [10, 20, 50], index=0, key="page_size_cards")
+            total_items = len(df)
+            total_pages = max(1, (total_items + page_size - 1) // page_size)
+            col_a, col_b, col_c = st.columns([1, 2, 1])
+            with col_a:
+                prev_clicked = st.button("◀ Anterior", disabled=(st.session_state.card_page <= 1))
+            with col_c:
+                next_clicked = st.button("Próxima ▶", disabled=(st.session_state.card_page >= total_pages))
+            if prev_clicked:
+                st.session_state.card_page = max(1, st.session_state.card_page - 1)
+            if next_clicked:
+                st.session_state.card_page = min(total_pages, st.session_state.card_page + 1)
+            with col_b:
+                st.markdown(f"**Página {st.session_state.card_page} de {total_pages}**")
+
+            start = (st.session_state.card_page - 1) * page_size
+            end = start + page_size
+            page_df = df.iloc[start:end].copy()
+
+            # Render cards (styled)
+            for _, row in page_df.iterrows():
+                link = row.get('Link para o edital','')
+                titulo = row.get('Título') or '(Sem título)'
+                cidade = row.get('Cidade','')
+                uf = row.get('UF','')
+                pub = row.get('Publicação','')
+                fim = row.get('Fim do envio de proposta','')
+                objeto = row.get('Objeto','')
+                modalidade = row.get('Modalidade','')
+                tipo = row.get('Tipo','')
+                orgao = row.get('Orgão','')
+                proc = row.get('numero_processo','')
+
+                html = f'''
+                <div class="ac-card">
+                    <h3>{titulo}</h3>
+                    <div class="ac-muted">
+                        <strong>Cidade/UF:</strong> {cidade} / {uf} &nbsp;|&nbsp;
+                        <strong>Publicação:</strong> {pub} &nbsp;|&nbsp;
+                        <strong>Fim do envio:</strong> {fim}
+                    </div>
+                    <div style="margin-top:0.5rem;"><strong>Objeto:</strong> {objeto}</div>
+                    <div style="display:flex; gap:1rem; margin-top:0.5rem; flex-wrap:wrap;">
+                        <div><strong>Modalidade:</strong> {modalidade}</div>
+                        <div><strong>Tipo:</strong> {tipo}</div>
+                        <div><strong>Órgão:</strong> {orgao}</div>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.6rem;">
+                        <div class="ac-muted">Processo: {proc}</div>
+                        {f'<a href="{link}" target="_blank" style="text-decoration:none; padding:0.45rem 0.8rem; border-radius:10px; border:1px solid #96b3e9;">Abrir edital</a>' if isinstance(link, str) and link else ''}
+                    </div>
+                </div>
+                '''
+                st.markdown(html, unsafe_allow_html=True)
+
+            # Controles de paginação no rodapé
+            col_a2, col_b2, col_c2 = st.columns([1, 2, 1])
+            with col_a2:
+                prev_clicked2 = st.button("◀ Anterior", key="prev_bottom", disabled=(st.session_state.card_page <= 1))
+            with col_c2:
+                next_clicked2 = st.button("Próxima ▶", key="next_bottom", disabled=(st.session_state.card_page >= total_pages))
+            if prev_clicked2:
+                st.session_state.card_page = max(1, st.session_state.card_page - 1)
+            if next_clicked2:
+                st.session_state.card_page = min(total_pages, st.session_state.card_page + 1)
+            with col_b2:
+                st.markdown(f"**Página {st.session_state.card_page} de {total_pages}**")
+
+            st.divider()
+
+            # Download XLSX (sem colunas auxiliares)
+            export_df = df.drop(columns=[c for c in ["_pub_raw", "_fim_raw", "_pub_dt"] if c in df.columns]).copy()
+            xlsx_buf = io.BytesIO()
+            with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as wr:
+                export_df.to_excel(wr, index=False, sheet_name="PNCP")
+            xlsx_bytes = xlsx_buf.getvalue()
+
+            st.markdown("### ⬇️ Baixar planilha")
+            st.download_button(
                 "Baixar XLSX",
                 data=xlsx_bytes,
                 file_name=f"pncp_resultados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
