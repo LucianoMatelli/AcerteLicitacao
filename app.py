@@ -426,36 +426,69 @@ def main():
 
     st.markdown('''
     <style>
-    /* Sidebar darker elegant blue */
+    /* Sidebar: subtle elegant blue */
     section[data-testid="stSidebar"] {
-        background: #0f2a56 !important;
+        background: #eaf2ff !important; /* suave, mais claro */
+        border-right: 1px solid #d6e4ff;
     }
+    /* Text and labels readable (dark navy) */
     section[data-testid="stSidebar"] * {
-        color: #f2f6ff !important;
+        color: #0f2240 !important;
     }
-    /* Increase contrast for main area slightly */
+    /* Inputs inside sidebar: white bg + dark text */
+    section[data-testid="stSidebar"] input,
+    section[data-testid="stSidebar"] textarea,
+    section[data-testid="stSidebar"] select,
+    section[data-testid="stSidebar"] .stTextInput input,
+    section[data-testid="stSidebar"] .stTextArea textarea,
+    section[data-testid="stSidebar"] .stSelectbox > div > div,
+    section[data-testid="stSidebar"] .stMultiSelect > div > div {
+        background: #ffffff !important;
+        color: #0f2240 !important;
+        border: 1px solid #b7c6e6 !important;
+        box-shadow: none !important;
+    }
+    section[data-testid="stSidebar"] input::placeholder,
+    section[data-testid="stSidebar"] textarea::placeholder {
+        color: #556080 !important;
+        opacity: 0.85;
+    }
+    /* Radio/checkbox accents */
+    section[data-testid="stSidebar"] .stRadio div[role="radiogroup"] label p,
+    section[data-testid="stSidebar"] .stCheckbox label p {
+        color: #0f2240 !important;
+    }
+
+    /* Main area slightly contrasted */
     div.block-container {
         background: #f9fbff;
         padding-top: 1rem;
         padding-bottom: 2rem;
     }
-    /* Card styling */
+
+    /* Cards: subtler blue and refined borders */
     .ac-card {
-        background: #f5f9ff;
-        border: 2px solid #c9dafc;
-        border-radius: 16px;
-        padding: 1rem 1.25rem;
+        background: #f7fbff;
+        border: 1.5px solid #cfdcf6;
+        border-radius: 18px;
+        padding: 1rem 1.2rem;
         margin-bottom: 0.9rem;
-        box-shadow: 0 1px 6px rgba(16, 38, 95, 0.06);
+        box-shadow: 0 1px 5px rgba(16, 38, 95, 0.05);
     }
     .ac-card h3 {
         margin-top: 0;
         margin-bottom: 0.25rem;
-        font-size: 1.05rem;
+        font-size: 1.06rem;
+        color: #0b1b36;
     }
     .ac-muted {
-        color: #4b5563;
+        color: #44516a;
         font-size: 0.92rem;
+    }
+    /* Link button inside card */
+    .ac-card a {
+        color: #0b3b8a;
+        border-color: #96b3e9 !important;
     }
     </style>
 ''', unsafe_allow_html=True)
