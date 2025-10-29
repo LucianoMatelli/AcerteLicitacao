@@ -573,25 +573,10 @@ def main():
         if df.empty:
             st.info("Nenhum resultado encontrado com os critérios atuais.")
         else:
-            st.dataframe(
-                df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Link para o edital": st.column_config.LinkColumn(
-                        "Link para o edital",
-                        display_text="Abrir edital"
-                    )
-                },
-            )
-            # Download XLSX
-            xlsx_buf = io.BytesIO()
-            with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as wr:
-                df.to_excel(wr, index=False, sheet_name="PNCP")
-            xlsx_bytes = xlsx_buf.getvalue()
-
-            st.markdown("### ⬇️ Baixar planilha")
-            st.download_button(
+            st.write('')
+st.markdown('> Exibição em cards ativada.')
+st.markdown('### ⬇️ Baixar planilha')
+st.download_button(
                 "Baixar XLSX",
                 data=xlsx_bytes,
                 file_name=f"pncp_resultados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
