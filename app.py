@@ -224,6 +224,8 @@ def consultar_pncp_por_municipio(
     return out
 
 def montar_registro(item: Dict, municipio_codigo: str) -> Dict:
+    pub_raw = item.get("data_publicacao_pncp") or item.get("data") or item.get("dataPublicacao") or ""
+    fim_raw = item.get("data_fim_vigencia") or item.get("fimEnvioProposta") or ""
     return {
         "municipio_codigo": municipio_codigo,
         "Cidade": item.get("municipio_nome", ""),
@@ -237,9 +239,12 @@ def montar_registro(item: Dict, municipio_codigo: str) -> Dict:
         "Orgão": item.get("orgao_nome", "") or item.get("orgao", ""),
         "Unidade": item.get("unidade_nome", ""),
         "Esfera": item.get("esfera_nome", ""),
-        "Publicação": _fmt_dt_iso_to_br(item.get("data_publicacao_pncp") or item.get("data") or item.get("dataPublicacao") or ""),
-        "Fim do envio de proposta": _fmt_dt_iso_to_br(item.get("data_fim_vigencia") or ""),
+        "Publicação": _fmt_dt_iso_to_br(pub_raw),
+        "Fim do envio de proposta": _fmt_dt_iso_to_br(fim_raw),
         "numero_processo": item.get("numeroProcesso") or item.get("processo") or "",
+        # Raw fields for sorting/pagination logic
+        "_pub_raw": pub_raw,
+        "_fim_raw": fim_raw,
     }
 
 def _load_saved_searches() -> Dict[str, Dict]:
