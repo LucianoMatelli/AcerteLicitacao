@@ -192,34 +192,6 @@ def _fetch_search_page(query: str, status_label: str, codigo_municipio_pncp: str
         return {"ok": True, "params": params, "data": data}
     # Payload inesperado
     return {"ok": True, "params": params, "data": data}
-(query: str, status_label: str, codigo_municipio_pncp: str, page: int) -> Dict:
-    """
-    Tenta as combinações de parâmetros até obter 200 OK e payload com lista.
-    """
-    status_values = STATUS_MAP.get(status_label, [])
-    param_sets = _compose_param_sets(query, status_values, codigo_municipio_pncp, page)
-
-    last_exc = None
-    for params in param_sets:
-        try:
-            resp = requests.get(PNCP_SEARCH_URL, params=params, timeout=30)
-            if resp.status_code != 200:
-                last_exc = Exception(f"{resp.status_code} {resp.reason} @ {PNCP_SEARCH_URL} {params}")
-                continue
-            data = resp.json()
-            # Aceitamos tanto dict com arrays conhecidos, quanto lista bruta
-            if isinstance(data, dict):
-                if any(k in data for k in ["content", "items", "resultados", "results"]):
-                    return {"ok": True, "params": params, "data": data}
-            elif isinstance(data, list):
-                return {"ok": True, "params": params, "data": data}
-            # Payload inesperado — tenta próximo set
-        except Exception as e:
-            last_exc = e
-            continue
-    raise RuntimeError(f"Falha na consulta /api/search — último erro: {last_exc}")
-
-
 def _build_pncp_link(item: Dict) -> str:
     for k in ["url", "link", "href"]:
         if k in item and isinstance(item[k], str) and item[k].startswith("http"):
