@@ -35,26 +35,47 @@ IBGE_CSV_PATHS = [
 ]
 SAVED_SEARCHES_PATH = os.path.join(BASE_DIR, "saved_searches.json")
 
-PNCP_API_URL = "https://pncp.gov.br/api/search"
-TAM_PAGINA_FIXO = 100  # conforme baseline aprovado
-
-STATUS_OPCOES = [
-    "Qualquer",
-    "PUBLICADO",
-    "EM_ANDAMENTO",
-    "SUSPENSO",
-    "REVOGADO",
-    "ANULADO",
-    "HOMOLOGADO",
-    "ENCERRADO",
+# ==============================
+# PNCP: endpoints e parâmetros
+# ==============================
+# Cadeia de endpoints candidatos (tentará em ordem até obter 200 OK)
+PNCP_ENDPOINTS = [
+    "https://www.pncp.gov.br/api/consulta/v1/licitacoes",
+    "https://pncp.gov.br/api/consulta/v1/licitacoes",
+    "https://www.pncp.gov.br/api/search",
+    "https://pncp.gov.br/api/search",
 ]
+
+TAM_PAGINA_FIXO = 100  # baseline aprovado
+
+# UI -> Backend: mapeamento de status
+# O filtro da UI tem 4 opções. Cada uma mapeia para 1..n valores plausíveis para a API.
+STATUS_LABELS = [
+    "A Receber/Recebendo Proposta",
+    "Em Julgamento/Propostas Encerradas",
+    "Encerradas",
+    "Todos",
+]
+
+STATUS_MAP = {
+    "A Receber/Recebendo Proposta": [
+        # valores usuais/observados
+        "ABERTO", "RECEBENDO_PROPOSTA", "RECEBENDO", "A_RECEBER", "PUBLICADO"
+    ],
+    "Em Julgamento/Propostas Encerradas": [
+        "EM_JULGAMENTO", "PROPOSTAS_ENCERRADAS", "EM_ANALISE"
+    ],
+    "Encerradas": [
+        "ENCERRADO", "HOMOLOGADO", "CONCLUIDO", "CANCELADO", "ANULADO", "REVOGADO"
+    ],
+    "Todos": []
+}
 
 
 # ==============================
 # Utilidades
 # ==============================
 def _norm(s: str) -> str:
-    """Normaliza string para comparação: minúsculas, sem acento, só [a-z0-9_]."""
     s = str(s or "").strip().lower()
     s = unicodedata.normalize("NFKD", s)
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
@@ -63,13 +84,10 @@ def _norm(s: str) -> str:
 
 
 def _guess_columns(df: pd.DataFrame):
-    """Tenta identificar colunas de nome, código e UF com normalização flexível."""
     if df is None or df.shape[1] == 0:
         return None, None, None
 
     norm_map = {_norm(c): c for c in df.columns}
-
-    # Possíveis chaves normalizadas
     nome_keys = ["nome", "municipio", "municipio_", "municipio__"]
     codigo_keys = ["codigo_pncp", "codigo", "id", "pncp", "codigo_pncp_", "codigo_municipio"]
     uf_keys = ["uf", "estado", "sigla_uf", "uf_sigla"]
@@ -77,17 +95,11 @@ def _guess_columns(df: pd.DataFrame):
     col_nome = next((norm_map[k] for k in nome_keys if k in norm_map), None)
     col_codigo = next((norm_map[k] for k in codigo_keys if k in norm_map), None)
     col_uf = next((norm_map[k] for k in uf_keys if k in norm_map), None)
-
     return col_nome, col_codigo, col_uf
 
 
 @st.cache_data(show_spinner=False)
 def load_municipios_pncp() -> pd.DataFrame:
-    """
-    Carrega a lista completa de municípios com seus códigos PNCP (planilha do usuário).
-    Aceita múltiplos encodings e separadores. Aceita cabeçalhos "id" e "Municipio".
-    Retorna colunas padronizadas: nome, codigo_pncp, uf (pode vir vazio se não houver na planilha).
-    """
     encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252"]
     seps = [",", ";", "\t", "|"]
     last_err = None
@@ -102,14 +114,12 @@ def load_municipios_pncp() -> pd.DataFrame:
                             continue
 
                         col_nome, col_codigo, col_uf = _guess_columns(df)
-                        # caso especial do usuário
                         if not col_nome and "Municipio" in df.columns:
                             col_nome = "Municipio"
                         if not col_codigo and "id" in df.columns:
                             col_codigo = "id"
 
                         if not col_nome or not col_codigo:
-                            # fallback best-effort
                             try:
                                 c1, c2 = df.columns[:2]
                                 col_nome = col_nome or c1
@@ -129,9 +139,7 @@ def load_municipios_pncp() -> pd.DataFrame:
                         else:
                             out["uf"] = ""
 
-                        # Índices normalizados para matching por nome
                         out["nome_norm"] = out["nome"].map(_norm)
-
                         out = out[out["codigo_pncp"] != ""]
                         out = out.drop_duplicates(subset=["codigo_pncp"]).reset_index(drop=True)
                         return out
@@ -146,11 +154,6 @@ def load_municipios_pncp() -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_ibge_catalog() -> Optional[pd.DataFrame]:
-    """
-    Carrega catálogo IBGE opcional com colunas: 'uf','municipio'.
-    Retorna dataframe padronizado: uf, municipio, municipio_norm.
-    Se não encontrado, retorna None (o app faz fallback).
-    """
     encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252"]
     seps = [",", ";", "\t", "|"]
     for path in IBGE_CSV_PATHS:
@@ -171,7 +174,6 @@ def load_ibge_catalog() -> Optional[pd.DataFrame]:
                             "municipio": df[col_mun].astype(str).str.strip(),
                         })
                         out["municipio_norm"] = out["municipio"].map(_norm)
-                        # Dedup
                         out = out.drop_duplicates(subset=["uf","municipio_norm"]).reset_index(drop=True)
                         return out
                     except Exception:
@@ -180,7 +182,6 @@ def load_ibge_catalog() -> Optional[pd.DataFrame]:
 
 
 def _build_pncp_link(item: Dict) -> str:
-    """Normaliza link do resultado do PNCP quando houver identificadores úteis na resposta."""
     for k in ["url", "link", "href"]:
         if k in item and isinstance(item[k], str) and item[k].startswith("http"):
             return item[k]
@@ -190,26 +191,47 @@ def _build_pncp_link(item: Dict) -> str:
     return ""
 
 
-def _pncp_params_baseline(query: str, status: str, codigo_municipio: str, page: int = 1) -> Dict:
+def _pncp_params(query: str, status_label: str, codigo_municipio: str, page: int) -> Dict:
+    """
+    Monta parâmetros com mapeamento de status e chaves alternativas para municipio.
+    """
+    status_values = STATUS_MAP.get(status_label, [])
     params = {
         "q": query or "",
-        "status": "" if status == "Qualquer" else status,
         "page": page,
         "size": TAM_PAGINA_FIXO,
+        # Alguns endpoints usam 'status', outros 'situacao'; enviamos ambos.
+        "status": ",".join(status_values) if status_values else None,
+        "situacao": ",".join(status_values) if status_values else None,
+        # chaves alternativas para município
         "codigoMunicipio": codigo_municipio,
         "codigo_municipio": codigo_municipio,
         "municipioCodigo": codigo_municipio,
+        "codigoIbge": codigo_municipio,
     }
     return {k: v for k, v in params.items() if v not in [None, ""]}
 
 
-def _fetch_pncp_page(params: Dict) -> Dict:
-    resp = requests.get(PNCP_API_URL, params=params, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+def _try_fetch_with_fallback(params: Dict) -> Dict:
+    """
+    Tenta múltiplos endpoints até obter 200 OK.
+    Preserva a semântica: GET com querystring.
+    """
+    last_exc = None
+    for url in PNCP_ENDPOINTS:
+        try:
+            resp = requests.get(url, params=params, timeout=30)
+            if resp.status_code == 200:
+                return {"ok": True, "url": url, "json": resp.json()}
+            else:
+                last_exc = Exception(f"{resp.status_code} {resp.reason} @ {url}")
+        except Exception as e:
+            last_exc = e
+            continue
+    raise RuntimeError(f"Falha nas tentativas de consulta PNCP. Último erro: {last_exc}")
 
 
-def _collect_results(query: str, status: str, codigos_municipio: List[str]) -> pd.DataFrame:
+def _collect_results(query: str, status_label: str, codigos_municipio: List[str]) -> pd.DataFrame:
     registros = []
     progress = st.progress(0.0, text="Iniciando varredura nos municípios selecionados...")
     total = len(codigos_municipio)
@@ -218,9 +240,10 @@ def _collect_results(query: str, status: str, codigos_municipio: List[str]) -> p
         progress.progress(idx / total, text=f"Consultando município código {cod} ({idx}/{total})")
         page = 1
         while True:
-            params = _pncp_params_baseline(query, status, cod, page=page)
+            params = _pncp_params(query, status_label, cod, page=page)
             try:
-                data = _fetch_pncp_page(params)
+                res = _try_fetch_with_fallback(params)
+                data = res.get("json", {})
             except Exception as e:
                 st.warning(f"Falha ao consultar município {cod} na página {page}: {e}")
                 break
@@ -235,6 +258,8 @@ def _collect_results(query: str, status: str, codigos_municipio: List[str]) -> p
                     items = data["resultados"]
                 elif "results" in data and isinstance(data["results"], list):
                     items = data["results"]
+            elif isinstance(data, list):
+                items = data
 
             if not items:
                 break
@@ -289,13 +314,13 @@ def _persist_saved_searches(d: Dict[str, Dict]):
 
 def _ensure_session_state():
     if "selected_municipios" not in st.session_state:
-        st.session_state.selected_municipios = []  # lista de dicts: {"codigo_pncp","nome","uf"}
+        st.session_state.selected_municipios = []
     if "saved_searches" not in st.session_state:
         st.session_state.saved_searches = _load_saved_searches()
     if "sidebar_inputs" not in st.session_state:
         st.session_state.sidebar_inputs = {
             "palavra_chave": "",
-            "status": "Qualquer",
+            "status": STATUS_LABELS[-1],  # "Todos"
             "uf": "Todos",
             "save_name": "",
             "selected_saved": None,
@@ -303,10 +328,6 @@ def _ensure_session_state():
 
 
 def _add_municipio_by_name(nome_municipio: str, uf: Optional[str], pncp_df: pd.DataFrame) -> None:
-    """
-    Adiciona município pela DENOMINAÇÃO (padrão IBGE), resolvendo o código PNCP via planilha do usuário.
-    Matching por nome normalizado. Se houver UF na planilha, prioriza correspondência pela UF também.
-    """
     if not nome_municipio:
         return
     sel = st.session_state.selected_municipios
@@ -315,31 +336,21 @@ def _add_municipio_by_name(nome_municipio: str, uf: Optional[str], pncp_df: pd.D
         return
 
     nome_norm = _norm(nome_municipio)
-
-    # 1) Se PNCP CSV tem UF e foi fornecida UF, usa match duplo
     candidates = pncp_df.copy()
     if "uf" in candidates.columns and uf and uf != "Todos":
         candidates = candidates[candidates["uf"].str.upper() == str(uf).upper()]
     candidates = candidates[candidates["nome_norm"] == nome_norm]
-
     if candidates.empty:
-        # fallback: tentativa sem UF (se acima filtrou por UF)
         candidates = pncp_df[pncp_df["nome_norm"] == nome_norm]
-
     if candidates.empty:
         st.error(f"Não localizei o município '{nome_municipio}' na planilha PNCP para resolver o código.")
         return
-
-    # Se houver ambiguidade, pega a primeira e informa
     if len(candidates) > 1:
         st.info(f"Foram encontradas {len(candidates)} entradas para '{nome_municipio}'. Usarei a primeira ocorrência.")
-
     row = candidates.iloc[0]
     codigo = row["codigo_pncp"]
     nome = row["nome"]
     uf_val = row.get("uf", uf or "")
-
-    # Evita duplicado por código
     if codigo in [m["codigo_pncp"] for m in sel]:
         return
     sel.append({"codigo_pncp": codigo, "nome": nome, "uf": uf_val})
@@ -355,34 +366,31 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     # 1) Palavra-chave
     st.session_state.sidebar_inputs["palavra_chave"] = st.sidebar.text_input("Palavra-chave", value=st.session_state.sidebar_inputs["palavra_chave"])
 
-    # 2) Status
-    st.session_state.sidebar_inputs["status"] = st.sidebar.selectbox("Status", STATUS_OPCOES, index=STATUS_OPCOES.index(st.session_state.sidebar_inputs["status"]))
+    # 2) Status (NOVO layout/labels conforme solicitação)
+    st.session_state.sidebar_inputs["status"] = st.sidebar.radio(
+        "Status",
+        STATUS_LABELS,
+        index=STATUS_LABELS.index(st.session_state.sidebar_inputs["status"]) if st.session_state.sidebar_inputs["status"] in STATUS_LABELS else STATUS_LABELS.index("Todos"),
+        help="Ajuste de exibição: quatro grupos funcionais. Mapeamento interno para valores da API."
+    )
 
-    # 3) Estado (UF) — preferir catálogo IBGE se disponível; senão, PNCP CSV; senão, 'Todos'
+    # 3) Estado (UF)
     if ibge_df is not None:
         ufs = sorted(ibge_df["uf"].dropna().unique().tolist())
     else:
-        # tenta PNCP CSV
         ufs = sorted([u for u in pncp_df.get("uf", pd.Series([], dtype=str)).dropna().unique().tolist() if u])
     ufs = (["Todos"] + ufs) if ufs else ["Todos"]
     if st.session_state.sidebar_inputs["uf"] not in ufs:
         st.session_state.sidebar_inputs["uf"] = "Todos"
     st.session_state.sidebar_inputs["uf"] = st.sidebar.selectbox("Estado (UF)", ufs, index=ufs.index(st.session_state.sidebar_inputs["uf"]))
 
-    # 4) Municípios (padrão IBGE na exibição; mapeamento para PNCP no add)
+    # 4) Municípios (IBGE-like → PNCP code)
     st.sidebar.markdown("**Municípios (máx. 25)**")
-
-    # Fonte dos municípios para exibição
     if ibge_df is not None:
-        if st.session_state.sidebar_inputs["uf"] == "Todos":
-            df_show = ibge_df.copy()
-        else:
-            df_show = ibge_df[ibge_df["uf"] == st.session_state.sidebar_inputs["uf"]].copy()
-        # Monta labels "Município / UF"
+        df_show = ibge_df if st.session_state.sidebar_inputs["uf"] == "Todos" else ibge_df[ibge_df["uf"] == st.session_state.sidebar_inputs["uf"]]
         df_show["label"] = df_show["municipio"] + " / " + df_show["uf"]
         mun_options = df_show[["municipio", "uf", "label"]].values.tolist()
     else:
-        # Fallback para planilha PNCP (pode não ter UF)
         df_temp = pncp_df.copy()
         if st.session_state.sidebar_inputs["uf"] != "Todos" and "uf" in df_temp.columns:
             df_temp = df_temp[df_temp["uf"].str.upper() == st.session_state.sidebar_inputs["uf"].upper()]
@@ -390,11 +398,9 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
         df_temp["label"] = df_temp["nome"] + " / " + df_temp["uf"]
         mun_options = df_temp[["nome", "uf", "label"]].values.tolist()
 
-    # Dropdown com busca (selectbox) e botão "Adicionar"
     labels = ["—"] + [row[2] for row in mun_options]
     chosen = st.sidebar.selectbox("Adicionar município (IBGE)", labels, index=0)
     if chosen != "—":
-        # Resolve o par (nome, uf) a partir do label escolhido
         sel_row = next((row for row in mun_options if row[2] == chosen), None)
         if sel_row:
             nome_sel, uf_sel, _ = sel_row
@@ -402,7 +408,6 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 _add_municipio_by_name(nome_sel, uf_sel, pncp_df)
                 st.rerun()
 
-    # Lista dos selecionados com botões de exclusão
     if st.session_state.selected_municipios:
         st.sidebar.caption("Selecionados:")
         for m in st.session_state.selected_municipios:
@@ -451,7 +456,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 payload = st.session_state.saved_searches.get(sel, {})
                 if payload:
                     st.session_state.sidebar_inputs["palavra_chave"] = payload.get("palavra_chave", "")
-                    st.session_state.sidebar_inputs["status"] = payload.get("status", "Qualquer") if payload.get("status", "Qualquer") in STATUS_OPCOES else "Qualquer"
+                    st.session_state.sidebar_inputs["status"] = payload.get("status", "Todos") if payload.get("status", "Todos") in STATUS_LABELS else "Todos"
                     st.session_state.sidebar_inputs["uf"] = payload.get("uf", "Todos")
                     st.session_state.selected_municipios = payload.get("municipios", [])
                     st.session_state.sidebar_inputs["save_name"] = sel
@@ -460,7 +465,6 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     else:
         st.sidebar.caption("Nenhuma pesquisa salva até o momento.")
 
-    # Botão final: Pesquisar
     pesquisar = st.sidebar.button("🔍 Pesquisar", use_container_width=True)
     return pesquisar
 
@@ -470,33 +474,28 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 # ==============================
 def main():
     st.title("📑 Acerte Licitações — O seu Buscador de Editais")
-    st.caption("Versão com **sidebar IBGE-like** (UF → Município) e mapeamento para código PNCP via planilha. Máx. 25 municípios por pesquisa.")
+    st.caption("Sidebar com Status (4 grupos), UF→Município (IBGE-like) e mapeamento para código PNCP. Máx. 25 municípios.")
 
     _ensure_session_state()
 
-    # Carregamentos
     try:
         pncp_df = load_municipios_pncp()
     except Exception as e:
         st.error(f"Erro ao carregar 'ListaMunicipiosPNCP.csv': {e}")
         st.stop()
 
-    ibge_df = load_ibge_catalog()  # pode ser None
+    ibge_df = load_ibge_catalog()
 
-    # Sidebar
     disparar_busca = _sidebar(pncp_df, ibge_df)
 
-    # Estado atual
     with st.expander("Configuração atual", expanded=False):
         st.write({
             "palavra_chave": st.session_state.sidebar_inputs["palavra_chave"],
             "status": st.session_state.sidebar_inputs["status"],
             "uf": st.session_state.sidebar_inputs["uf"],
             "municipios_selecionados": st.session_state.selected_municipios,
-            "fonte_ibge_disponivel": ibge_df is not None,
         })
 
-    # Execução da busca quando o usuário clicar
     if disparar_busca:
         if not st.session_state.selected_municipios:
             st.warning("Selecione pelo menos um município para pesquisar.")
@@ -504,17 +503,16 @@ def main():
 
         codigos = [m["codigo_pncp"] for m in st.session_state.selected_municipios]
         query = st.session_state.sidebar_inputs["palavra_chave"]
-        status = st.session_state.sidebar_inputs["status"]
+        status_label = st.session_state.sidebar_inputs["status"]
 
         with st.spinner("Consultando PNCP..."):
-            df = _collect_results(query=query, status=status, codigos_municipio=codigos)
+            df = _collect_results(query=query, status_label=status_label, codigos_municipio=codigos)
 
         st.subheader("Resultados")
         if df.empty:
             st.info("Nenhum resultado encontrado para os critérios informados.")
         else:
             st.dataframe(df, use_container_width=True, hide_index=True)
-            # Download
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
                 df.to_excel(writer, index=False, sheet_name="Resultados")
@@ -528,7 +526,7 @@ def main():
             )
 
     st.markdown("---")
-    st.caption("Baseline histórico preservado: paginação fixa TAM_PAGINA_FIXO=100 e normalização de links via `_build_pncp_link`. Forneça `data/IBGE_Municipios.csv` para catálogo IBGE completo.")
+    st.caption("Compat: tenta múltiplos endpoints PNCP. Se você confirmar o endpoint exato e os nomes de parâmetros, eu ajusto o mapeamento de forma determinística.")
 
 
 if __name__ == "__main__":
