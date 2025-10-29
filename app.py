@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -8,7 +7,7 @@ import json
 import time
 import unicodedata
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 
 import pandas as pd
 import requests
@@ -40,12 +39,8 @@ SAVED_SEARCHES_PATH = os.path.join(BASE_DIR, "saved_searches.json")
 
 ORIGIN = "https://pncp.gov.br"
 BASE_API = ORIGIN + "/api/search"
-UA = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122 Safari/537.36"
-)
 HEADERS = {
-    "User-Agent": UA,
+    "User-Agent": "AcerteLicitacoes/1.0 (+streamlit)",
     "Referer": "https://pncp.gov.br/app/editais",
     "Accept-Language": "pt-BR,pt;q=0.9",
 }
@@ -129,10 +124,10 @@ def load_municipios_pncp() -> pd.DataFrame:
     last_err = None
 
     def _guess_columns(df: pd.DataFrame):
-        norm_map = {_norm(c): c for c in df.columns}
-        col_nome = norm_map.get("municipio") or norm_map.get("nome") or ("Municipio" if "Municipio" in df.columns else None)
-        col_codigo = norm_map.get("id") or norm_map.get("codigo") or ("id" if "id" in df.columns else None)
-        col_uf = norm_map.get("uf") or norm_map.get("estado") or None
+        cols_norm = {_norm(c): c for c in df.columns}
+        col_nome = cols_norm.get("municipio") or cols_norm.get("nome") or ("Municipio" if "Municipio" in df.columns else None)
+        col_codigo = cols_norm.get("id") or cols_norm.get("codigo") or ("id" if "id" in df.columns else None)
+        col_uf = cols_norm.get("uf") or cols_norm.get("estado") or None
         return col_nome, col_codigo, col_uf
 
     for path in CSV_PNCP_PATHS:
@@ -242,7 +237,7 @@ def montar_registro(item: Dict, municipio_codigo: str) -> Dict:
         "Publicação": _fmt_dt_iso_to_br(pub_raw),
         "Fim do envio de proposta": _fmt_dt_iso_to_br(fim_raw),
         "numero_processo": item.get("numeroProcesso") or item.get("processo") or "",
-        # Raw fields for sorting/pagination logic
+        # colunas auxiliares (não vão para o XLSX)
         "_pub_raw": pub_raw,
         "_fim_raw": fim_raw,
     }
@@ -314,7 +309,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
         value=st.session_state.sidebar_inputs["palavra_chave"]
     )
 
-    # 2) Status (radio) com default "A Receber/Recebendo Proposta"
+    # 2) Status (radio) default “A Receber/Recebendo Proposta”
     st.session_state.sidebar_inputs["status_label"] = st.sidebar.radio(
         "Status",
         STATUS_LABELS,
@@ -336,6 +331,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     st.sidebar.markdown("**Municípios (máx. 25)**")
     if ibge_df is not None:
         df_show = ibge_df if st.session_state.sidebar_inputs["uf"] == "Todos" else ibge_df[ibge_df["uf"] == st.session_state.sidebar_inputs["uf"]]
+        df_show = df_show.copy()
         df_show["label"] = df_show["municipio"] + " / " + df_show["uf"]
         mun_options = df_show[["municipio", "uf", "label"]].values.tolist()
     else:
@@ -439,15 +435,6 @@ def main():
     # Sidebar
     disparar_busca = _sidebar(pncp_df, ibge_df)
 
-    # Diagnóstico (opcional)
-    with st.expander("Configuração atual", expanded=False):
-        st.write({
-            "palavra_chave": st.session_state.sidebar_inputs["palavra_chave"],
-            "status_label": st.session_state.sidebar_inputs["status_label"],
-            "uf": st.session_state.sidebar_inputs["uf"],
-            "municipios": st.session_state.selected_municipios,
-        })
-
     # Execução
     if disparar_busca:
         if not st.session_state.selected_municipios:
@@ -472,7 +459,6 @@ def main():
                 registros.append(montar_registro(it, m["codigo_pncp"]))
 
         progress.empty()
-
         df = pd.DataFrame(registros)
 
         # Filtro por palavra-chave (client-side no título/objeto)
@@ -483,42 +469,64 @@ def main():
             )
             df = df[mask].copy()
 
-        # Ordenação por data
-        if not df.empty and "Publicação" in df.columns:
-            try:
-                _tmp = pd.to_datetime(df["Publicação"], format="%d/%m/%Y %H:%M", errors="coerce")
-                df = df.assign(_ord=_tmp).sort_values("_ord", ascending=False, na_position="last").drop(columns=["_ord"])
-            except Exception:
-                pass
-
-        # Colunas e exibição
-        desired_order = [
-            "Cidade", "UF", "Título", "Objeto", "Link para o edital",
-            "Modalidade", "Tipo", "Tipo (documento)", "Orgão", "Unidade",
-            "Esfera", "Publicação", "Fim do envio de proposta"
-        ]
-        if not df.empty:
-            df = df[[c for c in desired_order if c in df.columns]]
-
         st.subheader(f"Resultados ({len(df)})")
         if df.empty:
             st.info("Nenhum resultado encontrado com os critérios atuais.")
         else:
-            st.dataframe(
-                df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Link para o edital": st.column_config.LinkColumn(
-                        "Link para o edital",
-                        display_text="Abrir edital"
-                    )
-                },
-            )
-            # Download XLSX
+            # Ordenação correta por data de publicação (desc)
+            try:
+                df["_pub_dt"] = pd.to_datetime(df["_pub_raw"], errors="coerce", utc=False)
+            except Exception:
+                df["_pub_dt"] = pd.NaT
+            df = df.sort_values("_pub_dt", ascending=False, na_position="last").reset_index(drop=True)
+
+            # Paginação de cards
+            if "card_page" not in st.session_state:
+                st.session_state.card_page = 1
+            page_size = st.selectbox("Itens por página", [10, 20, 50], index=0, key="page_size_cards")
+            total_items = len(df)
+            total_pages = max(1, (total_items + page_size - 1) // page_size)
+            col_a, col_b, col_c = st.columns([1, 2, 1])
+            with col_a:
+                prev_clicked = st.button("◀ Anterior", disabled=(st.session_state.card_page <= 1))
+            with col_c:
+                next_clicked = st.button("Próxima ▶", disabled=(st.session_state.card_page >= total_pages))
+            if prev_clicked:
+                st.session_state.card_page = max(1, st.session_state.card_page - 1)
+            if next_clicked:
+                st.session_state.card_page = min(total_pages, st.session_state.card_page + 1)
+            with col_b:
+                st.markdown(f"**Página {st.session_state.card_page} de {total_pages}**")
+
+            start = (st.session_state.card_page - 1) * page_size
+            end = start + page_size
+            page_df = df.iloc[start:end].copy()
+
+            # Render cards
+            for _, row in page_df.iterrows():
+                with st.container(border=True):
+                    st.markdown(f"### {row.get('Título') or '(Sem título)'}")
+                    meta_cols = st.columns([1, 1, 1])
+                    meta_cols[0].markdown(f"**Cidade/UF:** {row.get('Cidade','')} / {row.get('UF','')}")
+                    meta_cols[1].markdown(f"**Publicação:** {row.get('Publicação','')}")
+                    meta_cols[2].markdown(f"**Fim do envio:** {row.get('Fim do envio de proposta','')}")
+                    st.markdown(f"**Objeto:** {row.get('Objeto','')}")
+                    info_cols = st.columns([1, 1, 1])
+                    info_cols[0].markdown(f"**Modalidade:** {row.get('Modalidade','')}")
+                    info_cols[1].markdown(f"**Tipo:** {row.get('Tipo','')}")
+                    info_cols[2].markdown(f"**Órgão:** {row.get('Orgão','')}")
+                    link = row.get("Link para o edital","")
+                    if isinstance(link, str) and link:
+                        st.link_button("Abrir edital", link, use_container_width=True)
+                    st.caption(f"Processo: {row.get('numero_processo','')}")
+
+            st.divider()
+
+            # Download XLSX (sem colunas auxiliares)
+            export_df = df.drop(columns=[c for c in ["_pub_raw", "_fim_raw", "_pub_dt"] if c in df.columns]).copy()
             xlsx_buf = io.BytesIO()
             with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as wr:
-                df.to_excel(wr, index=False, sheet_name="PNCP")
+                export_df.to_excel(wr, index=False, sheet_name="PNCP")
             xlsx_bytes = xlsx_buf.getvalue()
 
             st.markdown("### ⬇️ Baixar planilha")
