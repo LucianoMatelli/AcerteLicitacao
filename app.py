@@ -512,9 +512,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     st.session_state.sidebar_inputs["selected_saved"] = selected_saved
 
     # Botão principal — ao final e com validação de UF obrigatória
-    st.sidebar.markdown('<div id="btnPesquisarWrap">', unsafe_allow_html=True)
     disparar_busca = st.sidebar.button("🔍 Pesquisar", use_container_width=True, type="primary", key="btn_pesquisar")
-    st.sidebar.markdown("</div>", unsafe_allow_html=True)
     if disparar_busca and uf == UF_PLACEHOLDER:
         st.sidebar.error("Selecione uma UF para habilitar a pesquisa.")
         disparar_busca = False
@@ -581,49 +579,29 @@ def main():
         div.block-container { padding-top: 2.1rem; background: #f7faff; padding-bottom: 2rem; }
 
         /* Card premium */
-        /* === Scoped buttons === */
-        /* Pesquisar (sidebar): fonte branca e fundo mais escuro — somente dentro do wrapper */
-        section[data-testid="stSidebar"] #btnPesquisarWrap .stButton > button {
-          color: #ffffff !important;
-          background: #1f4ba8 !important;
-          border: 1px solid #173a83 !important;
-        }
-        section[data-testid="stSidebar"] #btnPesquisarWrap .stButton > button:hover {
-          background: #173a83 !important;
-          border-color: #122e67 !important;
-        }
-        /* Download XLSX: mesmo padrão e ainda menor */
-        #dlWrap .stDownloadButton > button {
-          color: #ffffff !important;
-          background: #1f4ba8 !important;
-          border: 1px solid #173a83 !important;
-          font-size: 0.68rem !important;
-          padding: 0.26rem 0.32rem !important; /* bem mais estreito nas laterais */
-        }
-        #dlWrap .stDownloadButton > button:hover {
-          background: #173a83 !important;
-          border-color: #122e67 !important;
-        }
-
-        /* Botão primário (Pesquisar na sidebar) — apenas dentro do wrapper com id */
-        section[data-testid="stSidebar"] #btnPesquisarWrap .stButton > button {
-          color: #ffffff !important;
-          background: #1f4ba8 !important;
-          border: 1px solid #173a83 !important;
-        }
-        
-
-        /* Download button (cor e tamanho reduzido) */
-        
-        
-
         /* Botão primário (Pesquisar na sidebar) */
-        
-        
+        section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+          color: #ffffff !important;
+          background: #1f4ba8 !important; /* um pouco mais escuro */
+          border: 1px solid #173a83 !important;
+        }
+        section[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
+          background: #173a83 !important;
+          border-color: #122e67 !important;
+        }
 
         /* Download button (cor e tamanho reduzido ~60%) */
-        
-        
+        .stDownloadButton > button {
+          color: #ffffff !important;
+          background: #1f4ba8 !important;
+          border: 1px solid #173a83 !important;
+          font-size: 0.7rem !important;
+          padding: 0.28rem 0.6rem !important;
+        }
+        .stDownloadButton > button:hover {
+          background: #173a83 !important;
+          border-color: #122e67 !important;
+        }
 
         .ac-card {
           background: #f8fbff;
@@ -804,9 +782,14 @@ def main():
     xlsx_bytes = xlsx_buf.getvalue()
 
     st.markdown("### ⬇️ Baixar planilha")
-st.markdown('<div id="dlWrap">', unsafe_allow_html=True)
-    st.download_button("Baixar XLSX", data=xlsx_bytes, file_name=f"pncp_resultados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=False, type="primary")
-st.markdown("</div>", unsafe_allow_html=True)
+    st.download_button(
+        "Baixar XLSX",
+        data=xlsx_bytes,
+        file_name=f"pncp_resultados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        type="primary",
+    )
 
 if __name__ == "__main__":
     main()
