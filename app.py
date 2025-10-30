@@ -17,7 +17,7 @@ import streamlit as st
 # Configuração de página
 # ==========================
 st.set_page_config(
-    page_title="📑 Acerte Licitações — O seu Buscador de Editais",
+    page_title="Acerte Licitações: O seu Buscador de Editais",
     page_icon="📑",
     layout="wide",
 )
@@ -355,7 +355,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 
     # Palavra-chave e Status (reativos)
     palavra = st.sidebar.text_input(
-        "Palavra-chave (aplicada no título/objeto após coleta)",
+        "Palavra-chave (aplicada no título/objeto)",
         value=st.session_state.sidebar_inputs["palavra_chave"],
         key="palavra_chave_input",
     )
@@ -377,7 +377,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 
     # Estado (reativo e obrigatório)
     uf = st.sidebar.selectbox(
-        "Estado (UF) — obrigatório",
+        "Estado (UF) — Obrigatório",
         ufs,
         index=ufs.index(st.session_state.sidebar_inputs["uf"]) if st.session_state.sidebar_inputs["uf"] in ufs else 0,
         key="uf_select",
@@ -390,7 +390,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
         # ao trocar UF, não limpamos os já selecionados (usuário pode remover manualmente)
 
     # Municípios (reativo; depende da UF)
-    st.sidebar.markdown("**Municípios (máx. 25)**")
+    st.sidebar.markdown("**Municípios (máximo 25)**")
     if uf == UF_PLACEHOLDER:
         st.sidebar.info("Selecione um Estado (UF) para habilitar a seleção de municípios.")
         chosen = None
@@ -445,7 +445,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
             st.rerun()
 
     # Salvar / Excluir lado a lado
-    st.sidebar.subheader("💾 Salvar/Excluir pesquisa salva")
+    st.sidebar.subheader("💾 Pesquisa salva")
     save_name = st.sidebar.text_input(
         "Nome da pesquisa", value=st.session_state.sidebar_inputs["save_name"], key="save_name_input"
     )
@@ -555,7 +555,7 @@ def _add_municipio_by_name(nome_municipio: str, uf: Optional[str], pncp_df: pd.D
 # ==========================
 def main():
     st.title("📑 Acerte Licitações — O seu Buscador de Editais")
-    st.caption("Fluxo funcional: /api/search (PNCP) + seleção IBGE→PNCP. Máx. 25 municípios.")
+    st.caption("Selecione os municípios que deseja e o buscador da Acerte Licitações irá trazer os editais.")
 
     # ======== CSS Premium ========
     st.markdown(
