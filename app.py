@@ -520,9 +520,21 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 
         labels = ["—"] + [row[2] for row in mun_options]
         chosen = st.selectbox("Adicionar município (IBGE)", labels, index=0)
-        if chosen != "—":
-            sel_row = next((row for row in mun_options if row[2] == chosen), None)
-            if sel_row and st.form_submit_button("➕ Adicionar município"):
+        # Botão SEMPRE visível dentro do form; se nada selecionado, apenas alerta.
+        add_clicked = st.form_submit_button("➕ Adicionar município")
+        if add_clicked:
+            if chosen == "—":
+                st.warning("Selecione um município antes de adicionar.")
+            else:
+                sel_row = next((row for row in mun_options if row[2] == chosen), None)
+                if sel_row:
+                    nome_sel, uf_sel, _ = sel_row
+                    _add_municipio_by_name(nome_sel, uf_sel, pncp_df)
+                    st.session_state.sidebar_inputs["uf"] = uf  # manter UF
+                    st.session_state.sidebar_inputs["palavra_chave"] = palavra
+                    st.session_state.sidebar_inputs["status_label"] = status_label
+                    st.rerun()
+
                 nome_sel, uf_sel, _ = sel_row
                 _add_municipio_by_name(nome_sel, uf_sel, pncp_df)
                 st.session_state.sidebar_inputs["uf"] = uf  # manter UF selecionada
