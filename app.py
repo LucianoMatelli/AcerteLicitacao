@@ -6,6 +6,7 @@ import re
 import json
 import time
 import unicodedata
+import hashlib
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -17,7 +18,7 @@ import streamlit as st
 # Configuração de página
 # ==========================
 st.set_page_config(
-    page_title="Acerte Licitações: O seu Buscador de Editais",
+    page_title="📑 Acerte Licitações — O seu Buscador de Editais",
     page_icon="📑",
     layout="wide",
 )
@@ -36,6 +37,7 @@ CSV_IBGE_PATHS = [
     "IBGE_Municipios.csv",
 ]
 SAVED_SEARCHES_PATH = os.path.join(BASE_DIR, "saved_searches.json")
+SAVED_TR_PATH = os.path.join(BASE_DIR, "tr_marks.json")
 
 ORIGIN = "https://pncp.gov.br"
 BASE_API = ORIGIN + "/api/search"
@@ -119,13 +121,25 @@ def _primeiro_valor(*args):
             return a
     return ""
 
+def _uid_from_row(row: Dict) -> str:
+    """
+    Gera um identificador estável por edital para marcar 'TR Elaborado'.
+    Preferência: caminho /app/editais/{cnpj}/{ano}/{seq}. Fallback: hash de título+município+data.
+    """
+    link = str(row.get("Link para o edital") or "")
+    m = re.search(r"/app/editais/(\d{14})/(\d{4})/(\w+)", link)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    base = f"{row.get('Título','')}-{row.get('municipio_codigo','')}-{row.get('_pub_raw','')}"
+    return hashlib.md5(base.encode("utf-8")).hexdigest()
+
 # ==========================
 # Loaders
 # ==========================
 @st.cache_data(show_spinner=False)
 def load_municipios_pncp() -> pd.DataFrame:
     encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252"]
-    seps = [",", ";", "\\t", "|"]
+    seps = [",", ";", "\t", "|"]
     last_err = None
 
     def _guess_columns(df: pd.DataFrame):
@@ -164,7 +178,7 @@ def load_municipios_pncp() -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def load_ibge_catalog() -> Optional[pd.DataFrame]:
     encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252"]
-    seps = [",", ";", "\\t", "|"]
+    seps = [",", ";", "\t", "|"]
     for path in CSV_IBGE_PATHS:
         if os.path.exists(path):
             for enc in encodings:
@@ -282,6 +296,24 @@ def _persist_saved_searches(d: Dict[str, Dict]):
     except Exception as e:
         st.error(f"Falha ao salvar pesquisas: {e}")
 
+def _load_tr_marks() -> Dict[str, bool]:
+    if os.path.exists(SAVED_TR_PATH):
+        try:
+            with open(SAVED_TR_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return {str(k): bool(v) for k, v in data.items()}
+        except Exception:
+            pass
+    return {}
+
+def _persist_tr_marks(d: Dict[str, bool]):
+    try:
+        with open(SAVED_TR_PATH, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.error(f"Falha ao salvar marcações TR: {e}")
+
 def _ensure_session_state():
     if "selected_municipios" not in st.session_state:
         st.session_state.selected_municipios = []  # list[{codigo_pncp,nome,uf}]
@@ -307,6 +339,8 @@ def _ensure_session_state():
         st.session_state.results_df = None  # list[dict]
     if "results_signature" not in st.session_state:
         st.session_state.results_signature = None
+    if "tr_marks" not in st.session_state:
+        st.session_state.tr_marks = _load_tr_marks()
 
 # ==========================
 # Coleta agregada (CACHE)
@@ -387,7 +421,6 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     if uf != st.session_state.uf_prev:
         st.session_state.uf_prev = uf
         st.session_state.municipio_nonce += 1  # invalida/selectbox key para reconstruir widget
-        # ao trocar UF, não limpamos os já selecionados (usuário pode remover manualmente)
 
     # Municípios (reativo; depende da UF)
     st.sidebar.markdown("**Municípios (máximo 25)**")
@@ -511,7 +544,6 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     st.session_state.sidebar_inputs["selected_saved"] = selected_saved
 
     # Botão principal — ao final e com validação de UF obrigatória
-    # Wrapper para escopar o CSS só neste botão; texto sem emoji e fonte branca via CSS
     st.sidebar.markdown('<div id="btnPesquisarWrap">', unsafe_allow_html=True)
     disparar_busca = st.sidebar.button("Pesquisar", use_container_width=True, type="primary", key="btn_pesquisar")
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
@@ -601,6 +633,10 @@ def main():
           background: #eaf1ff; border: 1px solid #bcd0f7; color: #0b3b8a;
           padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem;
         }
+        .ac-flag {
+          background: #e3f9e5; border: 1px solid #57b26a; color: #1b6f37;
+          padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem; margin-left: 0.5rem;
+        }
         .ac-link {
           text-decoration:none; padding:0.46rem 0.85rem; border-radius:10px;
           border:1px solid #96b3e9; color:#0b3b8a;
@@ -608,7 +644,7 @@ def main():
 
         /* Apenas altera a cor da fonte do botão "Pesquisar" (escopo restrito) */
         section[data-testid="stSidebar"] #btnPesquisarWrap .stButton > button {
-          color: #F2F5F7 !important;
+          color: #ffffff !important;
         }
         </style>
         """,
@@ -714,11 +750,15 @@ def main():
         orgao = row.get('Orgão','')
         proc = (row.get('numero_processo') or '').strip()
 
+        uid = _uid_from_row(row)
+        current_flag = bool(st.session_state.tr_marks.get(uid, False))
+        tr_badge = '<span class="ac-flag">TR Elaborado</span>' if current_flag else ''
+
         processo_html = f'<div class="ac-muted">Processo: {proc}</div>' if proc else '<div></div>'
 
         html = f"""
         <div class="ac-card">
-            <h3>{titulo}</h3>
+            <h3>{titulo} {tr_badge}</h3>
             <div class="ac-muted">
                 <span class="ac-badge">{cidade} / {uf}</span>
                 &nbsp;•&nbsp;
@@ -739,6 +779,16 @@ def main():
         </div>
         """
         st.markdown(html, unsafe_allow_html=True)
+
+        # Linha de ação: checkbox TR Elaborado
+        col_cb, col_sp = st.columns([1, 3])
+        with col_cb:
+            new_val = st.checkbox("TR Elaborado", value=current_flag, key=f"tr_{uid}")
+        # Se mudou, persiste e refaz layout para refletir o badge
+        if new_val != current_flag:
+            st.session_state.tr_marks[uid] = bool(new_val)
+            _persist_tr_marks(st.session_state.tr_marks)
+            st.experimental_rerun()
 
     # Paginação (rodapé)
     col_a2, col_b2, col_c2 = st.columns([1, 2, 1])
