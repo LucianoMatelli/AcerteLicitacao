@@ -240,9 +240,30 @@ def consultar_pncp_por_municipio(
         time.sleep(delay_s)
     return out
 
+def _primeiro_valor(*args):
+    for a in args:
+        if a:
+            return a
+    return ""
+
 def montar_registro(item: Dict, municipio_codigo: str) -> Dict:
     pub_raw = item.get("data_publicacao_pncp") or item.get("data") or item.get("dataPublicacao") or ""
     fim_raw = item.get("data_fim_vigencia") or item.get("fimEnvioProposta") or ""
+
+    # Ampliar busca de número de processo (vários backends usam chaves diferentes)
+    processo = _primeiro_valor(
+        item.get("numeroProcesso"),
+        item.get("processo"),
+        item.get("numero_processo"),
+        item.get("numeroProcessoLicitatorio"),
+        item.get("numero_processo_licitatorio"),
+        item.get("processoLicitatorio"),
+        item.get("numProcesso"),
+        item.get("processNumber"),
+        item.get("numero_processo_adm"),
+        item.get("numeroProcessoAdministrativo"),
+    )
+
     return {
         "municipio_codigo": municipio_codigo,
         "Cidade": item.get("municipio_nome", ""),
@@ -258,7 +279,7 @@ def montar_registro(item: Dict, municipio_codigo: str) -> Dict:
         "Esfera": item.get("esfera_nome", ""),
         "Publicação": _fmt_dt_iso_to_br(pub_raw),
         "Fim do envio de proposta": _fmt_dt_iso_to_br(fim_raw),
-        "numero_processo": item.get("numeroProcesso") or item.get("processo") or "",
+        "numero_processo": str(processo or "").strip(),
         "_pub_raw": pub_raw,
         "_fim_raw": fim_raw,
         # campos que podem existir no search (quando muito sortudos)
@@ -302,6 +323,8 @@ def _ensure_session_state():
             "selected_saved": None,
             "enriquecer_valor": False,
         }
+    if "temp_mun_choice" not in st.session_state:
+        st.session_state.temp_mun_choice = None  # label IBGE atualmente selecionado
     if "card_page" not in st.session_state:
         st.session_state.card_page = 1
     if "page_size_cards" not in st.session_state:
@@ -324,11 +347,6 @@ def _build_signature(palavra_chave: str, status_value: str, enriquecer: bool) ->
 # ==========================
 @st.cache_data(ttl=900, show_spinner=False)
 def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
-    """
-    Coleta e filtra no servidor com base na 'signature' dos filtros.
-    Se signature['enriquecer'] for True, tenta enriquecer 'Valor estimado (R$)'.
-    TTL 900s para aliviar chamadas consecutivas com a mesma consulta.
-    """
     registros: List[Dict] = []
     codigos = signature.get("municipios", [])
     status_value = signature.get("status", "")
@@ -362,10 +380,8 @@ def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
     if signature.get("enriquecer") and not df.empty:
         df["Valor estimado (R$)"] = None
         for idx, row in df.iterrows():
-            # 1) Se veio algo no search, usa
             v = _parse_valor_number(row.get("_valor_estimado_search"))
             if v is None:
-                # 2) Tenta resolver via endpoints de detalhe
                 detail_val = _buscar_valor_estimado_por_det(row)
                 v = detail_val
             if v is not None:
@@ -373,47 +389,31 @@ def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
     return df
 
 def _possiveis_endpoints_detalhe(row: pd.Series) -> List[Tuple[str, dict]]:
-    """
-    Como a API de detalhe não é 100% padronizada entre órgãos, tentamos alguns caminhos heurísticos.
-    A ordem aqui é importante: endpoints mais prováveis primeiro.
-    """
     cnpj = str(row.get("_orgao_cnpj") or "").strip()
     ano = str(row.get("_ano") or "").strip()
     seq = str(row.get("_seq") or "").strip()
     doc_id = str(row.get("_id") or "").strip()
 
     endpoints: List[Tuple[str, dict]] = []
-
-    # 1) Se temos cnpj/ano/seq, alguns backends expõem endpoints de detalhe por tripla
     if cnpj and ano and seq:
         endpoints += [
             (f"{ORIGIN}/api/editais/{cnpj}/{ano}/{seq}", {}),
             (f"{ORIGIN}/api/licitacoes/{cnpj}/{ano}/{seq}", {}),
             (f"{ORIGIN}/api/documentos/edital/{cnpj}/{ano}/{seq}", {}),
         ]
-
-    # 2) Por id de documento (quando existir)
     if doc_id:
         endpoints += [
             (f"{ORIGIN}/api/documentos/{doc_id}", {}),
             (f"{ORIGIN}/api/documentos/detalhe/{doc_id}", {}),
         ]
-
-    # 3) Fallback: tentar acrescentar 'json=true' no link app/editais
     link = row.get("Link para o edital") or ""
     if isinstance(link, str) and "/app/editais/" in link:
         endpoints.append((link + ("&" if "?" in link else "?") + "json=true", {}))
-
     return endpoints
 
 def _from_detail_json_pegar_valor(js: dict) -> Optional[float]:
-    """
-    Varre várias chaves prováveis no JSON de detalhe, inclusive somando itens/lotes.
-    """
     if not isinstance(js, dict):
         return None
-
-    # tentativas diretas
     keys_diretas = [
         "valor_estimado_total", "valorTotalEstimado", "valorEstimado",
         "valor_global_estimado", "valorGlobalEstimado", "valor_licitacao",
@@ -424,8 +424,6 @@ def _from_detail_json_pegar_valor(js: dict) -> Optional[float]:
             v = _parse_valor_number(js.get(k))
             if v is not None:
                 return v
-
-    # seções aninhadas comuns
     blocos = [
         js.get("edital") or js.get("licitacao") or js.get("documento") or {},
         js.get("dados") or {},
@@ -439,7 +437,6 @@ def _from_detail_json_pegar_valor(js: dict) -> Optional[float]:
                     if v is not None:
                         return v
 
-    # estrutura por lotes/itens — somatório
     total = 0.0
     achou_algo = False
     for arr_key in ["lotes", "itens", "itensLicitacao", "itens_licitacao"]:
@@ -448,7 +445,6 @@ def _from_detail_json_pegar_valor(js: dict) -> Optional[float]:
             for it in arr:
                 if not isinstance(it, dict):
                     continue
-                # mais comuns
                 cand = (
                     it.get("valor_total") or it.get("valorTotal")
                     or it.get("valor_estimado") or it.get("valorEstimado")
@@ -456,7 +452,6 @@ def _from_detail_json_pegar_valor(js: dict) -> Optional[float]:
                 )
                 v = _parse_valor_number(cand)
                 if v is None:
-                    # tentar valorUnitario * quantidade
                     vu = _parse_valor_number(it.get("valor_unitario") or it.get("valorUnitario"))
                     qt = _parse_valor_number(it.get("quantidade") or it.get("qtd"))
                     if vu is not None and qt is not None:
@@ -466,7 +461,6 @@ def _from_detail_json_pegar_valor(js: dict) -> Optional[float]:
                     achou_algo = True
     if achou_algo:
         return total
-
     return None
 
 def _buscar_valor_estimado_por_det(row: pd.Series) -> Optional[float]:
@@ -474,7 +468,6 @@ def _buscar_valor_estimado_por_det(row: pd.Series) -> Optional[float]:
     for url, params in endpoints:
         try:
             r = requests.get(url, params=params or {}, headers=HEADERS, timeout=20)
-            # alguns endpoints retornam 200 com HTML; só seguimos se for JSON
             ct = r.headers.get("Content-Type", "")
             if "json" not in ct.lower():
                 time.sleep(ENRICH_DELAY_S)
@@ -534,18 +527,10 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
             mun_options = df_temp[["nome", "uf", "label"]].values.tolist()
 
         labels = ["—"] + [row[2] for row in mun_options]
-        chosen = st.selectbox("Adicionar município (IBGE)", labels, index=0)
-        if chosen != "—":
-            sel_row = next((row for row in mun_options if row[2] == chosen), None)
-            if sel_row and st.form_submit_button("➕ Adicionar município"):
-                nome_sel, uf_sel, _ = sel_row
-                _add_municipio_by_name(nome_sel, uf_sel, pncp_df)
-                st.session_state.sidebar_inputs["uf"] = uf  # manter UF selecionada
-                st.session_state.sidebar_inputs["palavra_chave"] = palavra
-                st.session_state.sidebar_inputs["status_label"] = status_label
-                st.rerun()
+        # Guardar escolha temporária no estado (para usar fora do form)
+        temp_choice = st.selectbox("Adicionar município (IBGE)", labels, index=0, key="temp_mun_choice")
 
-        # Lista de selecionados (remoção fora do form)
+        # Lista de selecionados (render somente texto aqui; botões de remoção ficam fora do form)
         if st.session_state.selected_municipios:
             st.caption("Selecionados:")
             for m in st.session_state.selected_municipios:
@@ -563,7 +548,7 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
         selected_saved = st.selectbox("Carregar pesquisa", ["—"] + saved_names, index=0)
         carregar = st.form_submit_button("Carregar")
 
-        # Novo: enriquecimento
+        # Enriquecimento
         enriquecer_valor = st.checkbox(
             "Incluir Valor Estimado (pode ser mais lento)",
             value=st.session_state.sidebar_inputs.get("enriquecer_valor", False)
@@ -573,6 +558,41 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
         disparar_busca = st.form_submit_button("🔍 Pesquisar")
 
     # AÇÕES fora do form
+    # Botão "Adicionar município" SEM depender do submit do form
+    if st.sidebar.button("➕ Adicionar município", use_container_width=True):
+        chosen = st.session_state.get("temp_mun_choice") or "—"
+        if chosen != "—":
+            # Precisamos reconstituir a linha selecionada
+            if ibge_df is not None:
+                source_df = ibge_df if st.session_state.sidebar_inputs["uf"] == "Todos" else ibge_df[ibge_df["uf"] == st.session_state.sidebar_inputs["uf"]]
+                source_df = source_df.copy()
+                source_df["label"] = source_df["municipio"] + " / " + source_df["uf"]
+                mun_options_now = source_df[["municipio", "uf", "label"]].values.tolist()
+            else:
+                df_temp = pncp_df.copy()
+                if st.session_state.sidebar_inputs["uf"] != "Todos" and "uf" in df_temp.columns:
+                    df_temp = df_temp[df_temp["uf"].str.upper() == st.session_state.sidebar_inputs["uf"].upper()]
+                df_temp["uf"] = df_temp.get("uf", "").astype(str).replace({"nan": ""})
+                df_temp["label"] = df_temp["nome"] + " / " + df_temp["uf"]
+                mun_options_now = df_temp[["nome", "uf", "label"]].values.tolist()
+
+            sel_row = next((row for row in mun_options_now if row[2] == chosen), None)
+            if sel_row:
+                nome_sel, uf_sel, _ = sel_row
+                _add_municipio_by_name(nome_sel, uf_sel, pncp_df)
+                st.success(f"Município '{nome_sel} / {uf_sel}' adicionado.")
+                st.rerun()
+        else:
+            st.warning("Selecione um município na lista antes de adicionar.")
+
+    # Remover municípios (fora do form, com botões individuais)
+    if st.session_state.selected_municipios:
+        st.sidebar.subheader("Remover município")
+        for m in list(st.session_state.selected_municipios):
+            if st.sidebar.button(f"✖ Remover {m['nome']}", key=f"rm_{m['codigo_pncp']}"):
+                _remove_municipio(m["codigo_pncp"])
+                st.rerun()
+
     if excluir:
         name = save_name.strip()
         if name and name in st.session_state.saved_searches:
@@ -793,7 +813,7 @@ def main():
         modalidade = row.get('Modalidade','')
         tipo = row.get('Tipo','')
         orgao = row.get('Orgão','')
-        proc = row.get('numero_processo','')
+        proc = (row.get('numero_processo') or '').strip()
         valor_est = row.get('Valor estimado (R$)')
 
         valor_html = ""
@@ -802,6 +822,8 @@ def main():
                 valor_html = f"<div><strong>Valor estimado:</strong> R$ {float(valor_est):,.2f}</div>".replace(",", "X").replace(".", ",").replace("X", ".")
             except Exception:
                 valor_html = f"<div><strong>Valor estimado:</strong> {valor_est}</div>"
+
+        processo_html = f'<div class="ac-muted">Processo: {proc}</div>' if proc else '<div></div>'
 
         html = f"""
         <div class="ac-card">
@@ -819,7 +841,7 @@ def main():
                 {valor_html}
             </div>
             <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.6rem;">
-                <div class="ac-muted">Processo: {proc}</div>
+                {processo_html}
                 {f'<a href="{link}" target="_blank" style="text-decoration:none; padding:0.45rem 0.8rem; border-radius:10px; border:1px solid #96b3e9;">Abrir edital</a>' if isinstance(link, str) and link else ''}
             </div>
         </div>
