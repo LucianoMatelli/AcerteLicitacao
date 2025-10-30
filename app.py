@@ -7,7 +7,7 @@ import json
 import time
 import unicodedata
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import pandas as pd
 import requests
@@ -40,12 +40,11 @@ SAVED_SEARCHES_PATH = os.path.join(BASE_DIR, "saved_searches.json")
 ORIGIN = "https://pncp.gov.br"
 BASE_API = ORIGIN + "/api/search"
 HEADERS = {
-    "User-Agent": "AcerteLicitacoes/1.1 (+streamlit)",
+    "User-Agent": "AcerteLicitacoes/1.0 (+streamlit)",
     "Referer": "https://pncp.gov.br/app/editais",
     "Accept-Language": "pt-BR,pt;q=0.9",
 }
 TAM_PAGINA_FIXO = 100  # parâmetro fixo de coleta
-ENRICH_DELAY_S = 0.12  # pequena folga entre chamadas de enriquecimento
 
 STATUS_LABELS = [
     "A Receber/Recebendo Proposta",
@@ -113,30 +112,13 @@ def _build_pncp_link(item: Dict) -> str:
     url = url.replace("/app/compras/", "/app/editais/").replace("/compras/", "/app/editais/")
     return url
 
-def _parse_valor_number(x) -> Optional[float]:
-    """Aceita str '1.234,56' ou float/int; retorna float em R$."""
-    if x is None:
-        return None
-    if isinstance(x, (int, float)):
-        return float(x)
-    s = str(x).strip()
-    if not s:
-        return None
-    s = re.sub(r"[^\d,.\-]", "", s)
-    if "," in s and s.rfind(",") > s.rfind("."):
-        s = s.replace(".", "").replace(",", ".")
-    try:
-        return float(s)
-    except Exception:
-        return None
-
 # ==========================
 # Loaders
 # ==========================
 @st.cache_data(show_spinner=False)
 def load_municipios_pncp() -> pd.DataFrame:
     encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252"]
-    seps = [",", ";", "	", "|"]
+    seps = [",", ";", "\t", "|"]
     last_err = None
 
     def _guess_columns(df: pd.DataFrame):
@@ -175,7 +157,7 @@ def load_municipios_pncp() -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def load_ibge_catalog() -> Optional[pd.DataFrame]:
     encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252"]
-    seps = [",", ";", "	", "|"]
+    seps = [",", ";", "\t", "|"]
     for path in CSV_IBGE_PATHS:
         if os.path.exists(path):
             for enc in encodings:
@@ -238,29 +220,9 @@ def consultar_pncp_por_municipio(
         time.sleep(delay_s)
     return out
 
-def _primeiro_valor(*args):
-    for a in args:
-        if a:
-            return a
-    return ""
-
 def montar_registro(item: Dict, municipio_codigo: str) -> Dict:
     pub_raw = item.get("data_publicacao_pncp") or item.get("data") or item.get("dataPublicacao") or ""
     fim_raw = item.get("data_fim_vigencia") or item.get("fimEnvioProposta") or ""
-
-    processo = _primeiro_valor(
-        item.get("numeroProcesso"),
-        item.get("processo"),
-        item.get("numero_processo"),
-        item.get("numeroProcessoLicitatorio"),
-        item.get("numero_processo_licitatorio"),
-        item.get("processoLicitatorio"),
-        item.get("numProcesso"),
-        item.get("processNumber"),
-        item.get("numero_processo_adm"),
-        item.get("numeroProcessoAdministrativo"),
-    )
-
     return {
         "municipio_codigo": municipio_codigo,
         "Cidade": item.get("municipio_nome", ""),
@@ -276,14 +238,9 @@ def montar_registro(item: Dict, municipio_codigo: str) -> Dict:
         "Esfera": item.get("esfera_nome", ""),
         "Publicação": _fmt_dt_iso_to_br(pub_raw),
         "Fim do envio de proposta": _fmt_dt_iso_to_br(fim_raw),
-        "numero_processo": str(processo or "").strip(),
+        "numero_processo": item.get("numeroProcesso") or item.get("processo") or "",
         "_pub_raw": pub_raw,
         "_fim_raw": fim_raw,
-        "_valor_estimado_search": item.get("valor_estimado_total") or item.get("valorTotalEstimado") or item.get("valorEstimado") or item.get("valor") or None,
-        "_orgao_cnpj": item.get("orgao_cnpj") or item.get("orgaoCnpj") or "",
-        "_ano": item.get("ano") or "",
-        "_seq": item.get("numero_sequencial") or item.get("numeroSequencial") or "",
-        "_id": item.get("id") or item.get("documentId") or item.get("documento_id") or "",
     }
 
 # ==========================
@@ -317,7 +274,6 @@ def _ensure_session_state():
             "uf": "Todos",
             "save_name": "",
             "selected_saved": None,
-            "enriquecer_valor": False,
         }
     if "card_page" not in st.session_state:
         st.session_state.card_page = 1
@@ -328,19 +284,22 @@ def _ensure_session_state():
     if "results_signature" not in st.session_state:
         st.session_state.results_signature = None
 
-def _build_signature(palavra_chave: str, status_value: str, enriquecer: bool) -> Dict:
+def _build_signature(palavra_chave: str, status_value: str) -> Dict:
     return {
         "municipios": [m["codigo_pncp"] for m in st.session_state.selected_municipios],
         "status": status_value or "",
         "q": (palavra_chave or "").strip().lower(),
-        "enriquecer": bool(enriquecer),
     }
 
 # ==========================
-# Cache server-side por assinatura (coleta + enriquecimento opcional)
+# Cache server-side por assinatura (recomendado)
 # ==========================
 @st.cache_data(ttl=900, show_spinner=False)
 def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
+    """
+    Coleta e filtra no servidor com base na 'signature' dos filtros.
+    TTL 900s para aliviar chamadas consecutivas com a mesma consulta.
+    """
     registros: List[Dict] = []
     codigos = signature.get("municipios", [])
     status_value = signature.get("status", "")
@@ -362,119 +321,17 @@ def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
         )
         df = df[mask].copy()
 
+    # coluna técnica para ordenar por data
     try:
         df["_pub_dt"] = pd.to_datetime(df["_pub_raw"], errors="coerce", utc=False)
     except Exception:
         df["_pub_dt"] = pd.NaT
     df.sort_values("_pub_dt", ascending=False, na_position="last", inplace=True)
     df.reset_index(drop=True, inplace=True)
-
-    if signature.get("enriquecer") and not df.empty:
-        df["Valor estimado (R$)"] = None
-        for idx, row in df.iterrows():
-            v = _parse_valor_number(row.get("_valor_estimado_search"))
-            if v is None:
-                detail_val = _buscar_valor_estimado_por_det(row)
-                v = detail_val
-            if v is not None:
-                df.at[idx, "Valor estimado (R$)"] = v
     return df
 
-def _possiveis_endpoints_detalhe(row: pd.Series) -> List[Tuple[str, dict]]:
-    cnpj = str(row.get("_orgao_cnpj") or "").strip()
-    ano = str(row.get("_ano") or "").strip()
-    seq = str(row.get("_seq") or "").strip()
-    doc_id = str(row.get("_id") or "").strip()
-
-    endpoints: List[Tuple[str, dict]] = []
-    if cnpj and ano and seq:
-        endpoints += [
-            (f"{ORIGIN}/api/editais/{cnpj}/{ano}/{seq}", {}),
-            (f"{ORIGIN}/api/licitacoes/{cnpj}/{ano}/{seq}", {}),
-            (f"{ORIGIN}/api/documentos/edital/{cnpj}/{ano}/{seq}", {}),
-        ]
-    if doc_id:
-        endpoints += [
-            (f"{ORIGIN}/api/documentos/{doc_id}", {}),
-            (f"{ORIGIN}/api/documentos/detalhe/{doc_id}", {}),
-        ]
-    link = row.get("Link para o edital") or ""
-    if isinstance(link, str) and "/app/editais/" in link:
-        endpoints.append((link + ("&" if "?" in link else "?") + "json=true", {}))
-    return endpoints
-
-def _from_detail_json_pegar_valor(js: dict) -> Optional[float]:
-    if not isinstance(js, dict):
-        return None
-    keys_diretas = [
-        "valor_estimado_total", "valorTotalEstimado", "valorEstimado",
-        "valor_global_estimado", "valorGlobalEstimado", "valor_licitacao",
-        "valorTotal", "valor",
-    ]
-    for k in keys_diretas:
-        if k in js:
-            v = _parse_valor_number(js.get(k))
-            if v is not None:
-                return v
-    blocos = [
-        js.get("edital") or js.get("licitacao") or js.get("documento") or {},
-        js.get("dados") or {},
-        js.get("metadados") or {},
-    ]
-    for bloco in blocos:
-        if isinstance(bloco, dict):
-            for k in keys_diretas:
-                if k in bloco:
-                    v = _parse_valor_number(bloco.get(k))
-                    if v is not None:
-                        return v
-
-    total = 0.0
-    achou_algo = False
-    for arr_key in ["lotes", "itens", "itensLicitacao", "itens_licitacao"]:
-        arr = js.get(arr_key)
-        if isinstance(arr, list) and arr:
-            for it in arr:
-                if not isinstance(it, dict):
-                    continue
-                cand = (
-                    it.get("valor_total") or it.get("valorTotal")
-                    or it.get("valor_estimado") or it.get("valorEstimado")
-                    or it.get("valor")
-                )
-                v = _parse_valor_number(cand)
-                if v is None:
-                    vu = _parse_valor_number(it.get("valor_unitario") or it.get("valorUnitario"))
-                    qt = _parse_valor_number(it.get("quantidade") or it.get("qtd"))
-                    if vu is not None and qt is not None:
-                        v = vu * qt
-                if v is not None:
-                    total += v
-                    achou_algo = True
-    if achou_algo:
-        return total
-    return None
-
-def _buscar_valor_estimado_por_det(row: pd.Series) -> Optional[float]:
-    endpoints = _possiveis_endpoints_detalhe(row)
-    for url, params in endpoints:
-        try:
-            r = requests.get(url, params=params or {}, headers=HEADERS, timeout=20)
-            ct = r.headers.get("Content-Type", "")
-            if "json" not in ct.lower():
-                time.sleep(ENRICH_DELAY_S)
-                continue
-            js = r.json()
-            v = _from_detail_json_pegar_valor(js)
-            if v is not None:
-                return v
-        except Exception:
-            pass
-        time.sleep(ENRICH_DELAY_S)
-    return None
-
 # ==========================
-# Sidebar (restaurada ao layout da versão anexa) — tudo em um único form
+# Sidebar (em formulário) — isola a coleta
 # ==========================
 def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     st.sidebar.header("🔎 Filtros")
@@ -503,7 +360,7 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 
         uf = st.selectbox("Estado (UF)", ufs, index=ufs.index(st.session_state.sidebar_inputs["uf"]))
 
-        # Municípios (IBGE-like → PNCP), com "➕ Adicionar município" DENTRO do form
+        # Municípios (IBGE-like → PNCP)
         st.markdown("**Municípios (máx. 25)**")
         if ibge_df is not None:
             df_show = ibge_df if uf == "Todos" else ibge_df[ibge_df["uf"] == uf]
@@ -520,21 +377,9 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 
         labels = ["—"] + [row[2] for row in mun_options]
         chosen = st.selectbox("Adicionar município (IBGE)", labels, index=0)
-        # Botão SEMPRE visível dentro do form; se nada selecionado, apenas alerta.
-        add_clicked = st.form_submit_button("➕ Adicionar município")
-        if add_clicked:
-            if chosen == "—":
-                st.warning("Selecione um município antes de adicionar.")
-            else:
-                sel_row = next((row for row in mun_options if row[2] == chosen), None)
-                if sel_row:
-                    nome_sel, uf_sel, _ = sel_row
-                    _add_municipio_by_name(nome_sel, uf_sel, pncp_df)
-                    st.session_state.sidebar_inputs["uf"] = uf  # manter UF
-                    st.session_state.sidebar_inputs["palavra_chave"] = palavra
-                    st.session_state.sidebar_inputs["status_label"] = status_label
-                    st.rerun()
-
+        if chosen != "—":
+            sel_row = next((row for row in mun_options if row[2] == chosen), None)
+            if sel_row and st.form_submit_button("➕ Adicionar município"):
                 nome_sel, uf_sel, _ = sel_row
                 _add_municipio_by_name(nome_sel, uf_sel, pncp_df)
                 st.session_state.sidebar_inputs["uf"] = uf  # manter UF selecionada
@@ -542,9 +387,10 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 st.session_state.sidebar_inputs["status_label"] = status_label
                 st.rerun()
 
-        # Lista dos selecionados (só exibição)
+        # Lista de selecionados com remover
         if st.session_state.selected_municipios:
             st.caption("Selecionados:")
+            # render em texto simples; remoção fora do form
             for m in st.session_state.selected_municipios:
                 st.write(f"- {m['nome']} / {m.get('uf','')} ({m['codigo_pncp']})")
 
@@ -560,16 +406,10 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
         selected_saved = st.selectbox("Carregar pesquisa", ["—"] + saved_names, index=0)
         carregar = st.form_submit_button("Carregar")
 
-        # Enriquecimento (mantido, mas discreto, ainda dentro do form)
-        enriquecer_valor = st.checkbox(
-            "Incluir Valor Estimado (pode ser mais lento)",
-            value=st.session_state.sidebar_inputs.get("enriquecer_valor", False)
-        )
-
         # Botão principal — submit do form
         disparar_busca = st.form_submit_button("🔍 Pesquisar")
 
-    # AÇÕES fora do form (igual versão anexa: apenas salvar/excluir/carregar persistência)
+    # AÇÕES fora do form (para não re-submeter tudo):
     if excluir:
         name = save_name.strip()
         if name and name in st.session_state.saved_searches:
@@ -589,7 +429,6 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 "status_label": status_label,
                 "uf": uf,
                 "municipios": st.session_state.selected_municipios,
-                "enriquecer_valor": bool(enriquecer_valor),
             }
             _persist_saved_searches(st.session_state.saved_searches)
             st.sidebar.success(f"Pesquisa '{name}' salva.")
@@ -604,7 +443,6 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 st.session_state.sidebar_inputs["uf"] = payload.get("uf", "Todos")
                 st.session_state.selected_municipios = payload.get("municipios", [])
                 st.session_state.sidebar_inputs["save_name"] = sel
-                st.session_state.sidebar_inputs["enriquecer_valor"] = payload.get("enriquecer_valor", False)
                 st.sidebar.success(f"Pesquisa '{sel}' carregada.")
                 st.rerun()
 
@@ -614,7 +452,6 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     st.session_state.sidebar_inputs["uf"] = uf
     st.session_state.sidebar_inputs["save_name"] = save_name
     st.session_state.sidebar_inputs["selected_saved"] = selected_saved
-    st.session_state.sidebar_inputs["enriquecer_valor"] = bool(enriquecer_valor)
 
     return disparar_busca
 
@@ -656,7 +493,7 @@ def main():
     st.title("📑 Acerte Licitações — O seu Buscador de Editais")
     st.caption("Fluxo funcional: /api/search (PNCP) + seleção IBGE→PNCP. Máx. 25 municípios.")
 
-    # CSS (restaurado do anexo, com cards sutis azuis)
+    # CSS sutil para sidebar e cards
     st.markdown("""
     <style>
     section[data-testid="stSidebar"] {
@@ -698,26 +535,23 @@ def main():
         st.stop()
     ibge_df = load_ibge_catalog()
 
-    # Sidebar em formulário (restaurada)
+    # Sidebar em formulário
     disparar_busca = _sidebar_form(pncp_df, ibge_df)
 
     # Monta assinatura e decide origem dos dados (cache vs memória)
     status_value = STATUS_MAP.get(st.session_state.sidebar_inputs["status_label"], "")
     palavra_chave = (st.session_state.sidebar_inputs["palavra_chave"] or "").strip()
-    enriquecer = bool(st.session_state.sidebar_inputs.get("enriquecer_valor", False))
     signature = {
         "municipios": [m["codigo_pncp"] for m in st.session_state.selected_municipios],
         "status": status_value,
         "q": palavra_chave.lower(),
-        "enriquecer": enriquecer,
     }
 
     if disparar_busca:
         if not signature["municipios"]:
             st.warning("Selecione pelo menos um município para pesquisar.")
             st.stop()
-        with st.spinner("Coletando dados no PNCP..."):
-            df = coletar_por_assinatura(signature)
+        df = coletar_por_assinatura(signature)
         st.session_state.results_df = df.to_dict("records")
         st.session_state.results_signature = signature
         st.session_state.card_page = 1  # reinicia paginação a cada nova coleta
@@ -727,6 +561,7 @@ def main():
             st.stop()
         df = pd.DataFrame(st.session_state.results_df)
 
+        # Se filtros mudaram, apenas sinaliza (não coleta até clicar Pesquisar)
         if st.session_state.results_signature and signature != st.session_state.results_signature:
             st.warning("Filtros alterados após a última coleta. Clique em **Pesquisar** para atualizar os resultados.")
 
@@ -736,6 +571,7 @@ def main():
         st.info("Nenhum resultado encontrado com os critérios atuais.")
         return
 
+    # Ordenação por data já aplicada em coletar_por_assinatura, mas reforçamos a coluna técnica se faltar
     if "_pub_dt" not in df.columns:
         try:
             df["_pub_dt"] = pd.to_datetime(df["_pub_raw"], errors="coerce", utc=False)
@@ -744,6 +580,7 @@ def main():
         df.sort_values("_pub_dt", ascending=False, na_position="last", inplace=True)
         df.reset_index(drop=True, inplace=True)
 
+    # Controle de paginação (não dispara coleta)
     page_size_cards = st.selectbox(
         "Itens por página",
         [10, 20, 50],
@@ -787,17 +624,7 @@ def main():
         modalidade = row.get('Modalidade','')
         tipo = row.get('Tipo','')
         orgao = row.get('Orgão','')
-        proc = (row.get('numero_processo') or '').strip()
-        valor_est = row.get('Valor estimado (R$)')
-
-        valor_html = ""
-        if valor_est is not None and valor_est != "":
-            try:
-                valor_html = f"<div><strong>Valor estimado:</strong> R$ {float(valor_est):,.2f}</div>".replace(",", "X").replace(".", ",").replace("X", ".")
-            except Exception:
-                valor_html = f"<div><strong>Valor estimado:</strong> {valor_est}</div>"
-
-        processo_html = f'<div class="ac-muted">Processo: {proc}</div>' if proc else '<div></div>'
+        proc = row.get('numero_processo','')
 
         html = f"""
         <div class="ac-card">
@@ -812,10 +639,9 @@ def main():
                 <div><strong>Modalidade:</strong> {modalidade}</div>
                 <div><strong>Tipo:</strong> {tipo}</div>
                 <div><strong>Órgão:</strong> {orgao}</div>
-                {valor_html}
             </div>
             <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.6rem;">
-                {processo_html}
+                <div class="ac-muted">Processo: {proc}</div>
                 {f'<a href="{link}" target="_blank" style="text-decoration:none; padding:0.45rem 0.8rem; border-radius:10px; border:1px solid #96b3e9;">Abrir edital</a>' if isinstance(link, str) and link else ''}
             </div>
         </div>
@@ -840,8 +666,7 @@ def main():
     st.divider()
 
     # ===== Exportação XLSX (sem colunas técnicas) =====
-    drop_cols = [c for c in ["_pub_raw", "_fim_raw", "_pub_dt", "_valor_estimado_search", "_orgao_cnpj", "_ano", "_seq", "_id"] if c in df.columns]
-    export_df = df.drop(columns=drop_cols).copy()
+    export_df = df.drop(columns=[c for c in ["_pub_raw", "_fim_raw", "_pub_dt"] if c in df.columns]).copy()
     xlsx_buf = io.BytesIO()
     with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as wr:
         export_df.to_excel(wr, index=False, sheet_name="PNCP")
