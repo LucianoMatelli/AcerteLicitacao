@@ -17,7 +17,7 @@ import streamlit as st
 # Configuração de página
 # ==========================
 st.set_page_config(
-    page_title="Acerte Licitações — O seu Buscador de Editais",
+    page_title="📑 Acerte Licitações — O seu Buscador de Editais",
     page_icon="📑",
     layout="wide",
 )
@@ -428,10 +428,10 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 _add_municipio_by_name(nome_sel, uf_sel, pncp_df)
 
 
+
     # Lista dos selecionados (com botão de remover “✕”)
     if st.session_state.selected_municipios:
         st.sidebar.caption("Selecionados:")
-        # Renderiza cada município com um botão “✕” ao lado para remover
         keep_list = []
         for m in st.session_state.selected_municipios:
             c1, c2 = st.sidebar.columns([0.82, 0.18])
@@ -439,20 +439,13 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 st.markdown(f"- **{m['nome']}** / {m.get('uf','')} (`{m['codigo_pncp']}`)")
             with c2:
                 if st.button("✕", key=f"rm_{m['codigo_pncp']}", help=f"Remover {m['nome']}"):
-                    # Skip adding this one (remove)
-                    pass
+                    pass  # remove
                 else:
                     keep_list.append(m)
         if len(keep_list) != len(st.session_state.selected_municipios):
             st.session_state.selected_municipios = keep_list
             st.rerun()
-
-    if st.session_state.selected_municipios:
-        st.sidebar.caption("Selecionados:")
-        for m in st.session_state.selected_municipios:
-            st.sidebar.write(f"- {m['nome']} / {m.get('uf','')} ({m['codigo_pncp']})")
-
-    # Salvar / Excluir lado a lado
+        # Salvar / Excluir lado a lado
     st.sidebar.subheader("💾 Salvar/Excluir pesquisa salva")
     save_name = st.sidebar.text_input(
         "Nome da pesquisa", value=st.session_state.sidebar_inputs["save_name"], key="save_name_input"
