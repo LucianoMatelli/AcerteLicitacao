@@ -7,7 +7,7 @@ import json
 import time
 import unicodedata
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
@@ -40,11 +40,12 @@ SAVED_SEARCHES_PATH = os.path.join(BASE_DIR, "saved_searches.json")
 ORIGIN = "https://pncp.gov.br"
 BASE_API = ORIGIN + "/api/search"
 HEADERS = {
-    "User-Agent": "AcerteLicitacoes/1.0 (+streamlit)",
+    "User-Agent": "AcerteLicitacoes/1.1 (+streamlit)",
     "Referer": "https://pncp.gov.br/app/editais",
     "Accept-Language": "pt-BR,pt;q=0.9",
 }
 TAM_PAGINA_FIXO = 100  # parâmetro fixo de coleta
+ENRICH_DELAY_S = 0.12  # pequena folga entre chamadas de enriquecimento
 
 STATUS_LABELS = [
     "A Receber/Recebendo Proposta",
@@ -111,6 +112,25 @@ def _build_pncp_link(item: Dict) -> str:
     url = _full_url(raw)
     url = url.replace("/app/compras/", "/app/editais/").replace("/compras/", "/app/editais/")
     return url
+
+def _parse_valor_number(x) -> Optional[float]:
+    """Aceita str '1.234,56' ou float/int; retorna float em R$."""
+    if x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x).strip()
+    if not s:
+        return None
+    # remove currency and spaces
+    s = re.sub(r"[^\d,.\-]", "", s)
+    # heuristic: if comma is decimal separator
+    if "," in s and s.rfind(",") > s.rfind("."):
+        s = s.replace(".", "").replace(",", ".")
+    try:
+        return float(s)
+    except Exception:
+        return None
 
 # ==========================
 # Loaders
@@ -241,6 +261,12 @@ def montar_registro(item: Dict, municipio_codigo: str) -> Dict:
         "numero_processo": item.get("numeroProcesso") or item.get("processo") or "",
         "_pub_raw": pub_raw,
         "_fim_raw": fim_raw,
+        # campos que podem existir no search (quando muito sortudos)
+        "_valor_estimado_search": item.get("valor_estimado_total") or item.get("valorTotalEstimado") or item.get("valorEstimado") or item.get("valor") or None,
+        "_orgao_cnpj": item.get("orgao_cnpj") or item.get("orgaoCnpj") or "",
+        "_ano": item.get("ano") or "",
+        "_seq": item.get("numero_sequencial") or item.get("numeroSequencial") or "",
+        "_id": item.get("id") or item.get("documentId") or item.get("documento_id") or "",
     }
 
 # ==========================
@@ -274,6 +300,7 @@ def _ensure_session_state():
             "uf": "Todos",
             "save_name": "",
             "selected_saved": None,
+            "enriquecer_valor": False,
         }
     if "card_page" not in st.session_state:
         st.session_state.card_page = 1
@@ -284,20 +311,22 @@ def _ensure_session_state():
     if "results_signature" not in st.session_state:
         st.session_state.results_signature = None
 
-def _build_signature(palavra_chave: str, status_value: str) -> Dict:
+def _build_signature(palavra_chave: str, status_value: str, enriquecer: bool) -> Dict:
     return {
         "municipios": [m["codigo_pncp"] for m in st.session_state.selected_municipios],
         "status": status_value or "",
         "q": (palavra_chave or "").strip().lower(),
+        "enriquecer": bool(enriquecer),  # para cachear também a decisão de enriquecer
     }
 
 # ==========================
-# Cache server-side por assinatura (recomendado)
+# Cache server-side por assinatura (coleta + enriquecimento opcional)
 # ==========================
 @st.cache_data(ttl=900, show_spinner=False)
 def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
     """
     Coleta e filtra no servidor com base na 'signature' dos filtros.
+    Se signature['enriquecer'] for True, tenta enriquecer 'Valor estimado (R$)'.
     TTL 900s para aliviar chamadas consecutivas com a mesma consulta.
     """
     registros: List[Dict] = []
@@ -328,7 +357,136 @@ def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
         df["_pub_dt"] = pd.NaT
     df.sort_values("_pub_dt", ascending=False, na_position="last", inplace=True)
     df.reset_index(drop=True, inplace=True)
+
+    # Enriquecimento opcional
+    if signature.get("enriquecer") and not df.empty:
+        df["Valor estimado (R$)"] = None
+        for idx, row in df.iterrows():
+            # 1) Se veio algo no search, usa
+            v = _parse_valor_number(row.get("_valor_estimado_search"))
+            if v is None:
+                # 2) Tenta resolver via endpoints de detalhe
+                detail_val = _buscar_valor_estimado_por_det(row)
+                v = detail_val
+            if v is not None:
+                df.at[idx, "Valor estimado (R$)"] = v
     return df
+
+def _possiveis_endpoints_detalhe(row: pd.Series) -> List[Tuple[str, dict]]:
+    """
+    Como a API de detalhe não é 100% padronizada entre órgãos, tentamos alguns caminhos heurísticos.
+    A ordem aqui é importante: endpoints mais prováveis primeiro.
+    """
+    cnpj = str(row.get("_orgao_cnpj") or "").strip()
+    ano = str(row.get("_ano") or "").strip()
+    seq = str(row.get("_seq") or "").strip()
+    doc_id = str(row.get("_id") or "").strip()
+
+    endpoints: List[Tuple[str, dict]] = []
+
+    # 1) Se temos cnpj/ano/seq, alguns backends expõem endpoints de detalhe por tripla
+    if cnpj and ano and seq:
+        endpoints += [
+            (f"{ORIGIN}/api/editais/{cnpj}/{ano}/{seq}", {}),
+            (f"{ORIGIN}/api/licitacoes/{cnpj}/{ano}/{seq}", {}),
+            (f"{ORIGIN}/api/documentos/edital/{cnpj}/{ano}/{seq}", {}),
+        ]
+
+    # 2) Por id de documento (quando existir)
+    if doc_id:
+        endpoints += [
+            (f"{ORIGIN}/api/documentos/{doc_id}", {}),
+            (f"{ORIGIN}/api/documentos/detalhe/{doc_id}", {}),
+        ]
+
+    # 3) Fallback: tentar acrescentar 'json=true' no link app/editais
+    link = row.get("Link para o edital") or ""
+    if isinstance(link, str) and "/app/editais/" in link:
+        endpoints.append((link + ("&" if "?" in link else "?") + "json=true", {}))
+
+    return endpoints
+
+def _from_detail_json_pegar_valor(js: dict) -> Optional[float]:
+    """
+    Varre várias chaves prováveis no JSON de detalhe, inclusive somando itens/lotes.
+    """
+    if not isinstance(js, dict):
+        return None
+
+    # tentativas diretas
+    keys_diretas = [
+        "valor_estimado_total", "valorTotalEstimado", "valorEstimado",
+        "valor_global_estimado", "valorGlobalEstimado", "valor_licitacao",
+        "valorTotal", "valor",
+    ]
+    for k in keys_diretas:
+        if k in js:
+            v = _parse_valor_number(js.get(k))
+            if v is not None:
+                return v
+
+    # seções aninhadas comuns
+    blocos = [
+        js.get("edital") or js.get("licitacao") or js.get("documento") or {},
+        js.get("dados") or {},
+        js.get("metadados") or {},
+    ]
+    for bloco in blocos:
+        if isinstance(bloco, dict):
+            for k in keys_diretas:
+                if k in bloco:
+                    v = _parse_valor_number(bloco.get(k))
+                    if v is not None:
+                        return v
+
+    # estrutura por lotes/itens — somatório
+    total = 0.0
+    achou_algo = False
+    for arr_key in ["lotes", "itens", "itensLicitacao", "itens_licitacao"]:
+        arr = js.get(arr_key)
+        if isinstance(arr, list) and arr:
+            for it in arr:
+                if not isinstance(it, dict):
+                    continue
+                # mais comuns
+                cand = (
+                    it.get("valor_total") or it.get("valorTotal")
+                    or it.get("valor_estimado") or it.get("valorEstimado")
+                    or it.get("valor")
+                )
+                v = _parse_valor_number(cand)
+                if v is None:
+                    # tentar valorUnitario * quantidade
+                    vu = _parse_valor_number(it.get("valor_unitario") or it.get("valorUnitario"))
+                    qt = _parse_valor_number(it.get("quantidade") or it.get("qtd"))
+                    if vu is not None and qt is not None:
+                        v = vu * qt
+                if v is not None:
+                    total += v
+                    achou_algo = True
+    if achou_algo:
+        return total
+
+    return None
+
+def _buscar_valor_estimado_por_det(row: pd.Series) -> Optional[float]:
+    endpoints = _possiveis_endpoints_detalhe(row)
+    for url, params in endpoints:
+        try:
+            r = requests.get(url, params=params or {}, headers=HEADERS, timeout=20)
+            # alguns endpoints retornam 200 com HTML; só seguimos se for JSON
+            ct = r.headers.get("Content-Type", "")
+            if "json" not in ct.lower():
+                time.sleep(ENRICH_DELAY_S)
+                continue
+            js = r.json()
+            v = _from_detail_json_pegar_valor(js)
+            if v is not None:
+                return v
+        except Exception:
+            pass
+        time.sleep(ENRICH_DELAY_S)
+    return None
 
 # ==========================
 # Sidebar (em formulário) — isola a coleta
@@ -387,10 +545,9 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 st.session_state.sidebar_inputs["status_label"] = status_label
                 st.rerun()
 
-        # Lista de selecionados com remover
+        # Lista de selecionados (remoção fora do form)
         if st.session_state.selected_municipios:
             st.caption("Selecionados:")
-            # render em texto simples; remoção fora do form
             for m in st.session_state.selected_municipios:
                 st.write(f"- {m['nome']} / {m.get('uf','')} ({m['codigo_pncp']})")
 
@@ -406,10 +563,16 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
         selected_saved = st.selectbox("Carregar pesquisa", ["—"] + saved_names, index=0)
         carregar = st.form_submit_button("Carregar")
 
+        # Novo: enriquecimento
+        enriquecer_valor = st.checkbox(
+            "Incluir Valor Estimado (pode ser mais lento)",
+            value=st.session_state.sidebar_inputs.get("enriquecer_valor", False)
+        )
+
         # Botão principal — submit do form
         disparar_busca = st.form_submit_button("🔍 Pesquisar")
 
-    # AÇÕES fora do form (para não re-submeter tudo):
+    # AÇÕES fora do form
     if excluir:
         name = save_name.strip()
         if name and name in st.session_state.saved_searches:
@@ -429,6 +592,7 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 "status_label": status_label,
                 "uf": uf,
                 "municipios": st.session_state.selected_municipios,
+                "enriquecer_valor": bool(enriquecer_valor),
             }
             _persist_saved_searches(st.session_state.saved_searches)
             st.sidebar.success(f"Pesquisa '{name}' salva.")
@@ -443,6 +607,7 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 st.session_state.sidebar_inputs["uf"] = payload.get("uf", "Todos")
                 st.session_state.selected_municipios = payload.get("municipios", [])
                 st.session_state.sidebar_inputs["save_name"] = sel
+                st.session_state.sidebar_inputs["enriquecer_valor"] = payload.get("enriquecer_valor", False)
                 st.sidebar.success(f"Pesquisa '{sel}' carregada.")
                 st.rerun()
 
@@ -452,6 +617,7 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     st.session_state.sidebar_inputs["uf"] = uf
     st.session_state.sidebar_inputs["save_name"] = save_name
     st.session_state.sidebar_inputs["selected_saved"] = selected_saved
+    st.session_state.sidebar_inputs["enriquecer_valor"] = bool(enriquecer_valor)
 
     return disparar_busca
 
@@ -541,17 +707,20 @@ def main():
     # Monta assinatura e decide origem dos dados (cache vs memória)
     status_value = STATUS_MAP.get(st.session_state.sidebar_inputs["status_label"], "")
     palavra_chave = (st.session_state.sidebar_inputs["palavra_chave"] or "").strip()
+    enriquecer = bool(st.session_state.sidebar_inputs.get("enriquecer_valor", False))
     signature = {
         "municipios": [m["codigo_pncp"] for m in st.session_state.selected_municipios],
         "status": status_value,
         "q": palavra_chave.lower(),
+        "enriquecer": enriquecer,
     }
 
     if disparar_busca:
         if not signature["municipios"]:
             st.warning("Selecione pelo menos um município para pesquisar.")
             st.stop()
-        df = coletar_por_assinatura(signature)
+        with st.spinner("Coletando dados no PNCP..."):
+            df = coletar_por_assinatura(signature)
         st.session_state.results_df = df.to_dict("records")
         st.session_state.results_signature = signature
         st.session_state.card_page = 1  # reinicia paginação a cada nova coleta
@@ -625,6 +794,14 @@ def main():
         tipo = row.get('Tipo','')
         orgao = row.get('Orgão','')
         proc = row.get('numero_processo','')
+        valor_est = row.get('Valor estimado (R$)')
+
+        valor_html = ""
+        if valor_est is not None and valor_est != "":
+            try:
+                valor_html = f"<div><strong>Valor estimado:</strong> R$ {float(valor_est):,.2f}</div>".replace(",", "X").replace(".", ",").replace("X", ".")
+            except Exception:
+                valor_html = f"<div><strong>Valor estimado:</strong> {valor_est}</div>"
 
         html = f"""
         <div class="ac-card">
@@ -639,6 +816,7 @@ def main():
                 <div><strong>Modalidade:</strong> {modalidade}</div>
                 <div><strong>Tipo:</strong> {tipo}</div>
                 <div><strong>Órgão:</strong> {orgao}</div>
+                {valor_html}
             </div>
             <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.6rem;">
                 <div class="ac-muted">Processo: {proc}</div>
@@ -666,7 +844,8 @@ def main():
     st.divider()
 
     # ===== Exportação XLSX (sem colunas técnicas) =====
-    export_df = df.drop(columns=[c for c in ["_pub_raw", "_fim_raw", "_pub_dt"] if c in df.columns]).copy()
+    drop_cols = [c for c in ["_pub_raw", "_fim_raw", "_pub_dt", "_valor_estimado_search", "_orgao_cnpj", "_ano", "_seq", "_id"] if c in df.columns]
+    export_df = df.drop(columns=drop_cols).copy()
     xlsx_buf = io.BytesIO()
     with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as wr:
         export_df.to_excel(wr, index=False, sheet_name="PNCP")
