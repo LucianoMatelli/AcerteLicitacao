@@ -377,7 +377,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 
     # Estado (reativo e obrigatório)
     uf = st.sidebar.selectbox(
-        "Estado (UF) — obrigatório",
+        "Estado (UF) — Obrigatório",
         ufs,
         index=ufs.index(st.session_state.sidebar_inputs["uf"]) if st.session_state.sidebar_inputs["uf"] in ufs else 0,
         key="uf_select",
@@ -390,7 +390,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
         # ao trocar UF, não limpamos os já selecionados (usuário pode remover manualmente)
 
     # Municípios (reativo; depende da UF)
-    st.sidebar.markdown("**Municípios (máx. 25)**")
+    st.sidebar.markdown("**Municípios (máximo. 25)**")
     if uf == UF_PLACEHOLDER:
         st.sidebar.info("Selecione um Estado (UF) para habilitar a seleção de municípios.")
         chosen = None
