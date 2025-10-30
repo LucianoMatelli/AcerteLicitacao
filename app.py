@@ -427,7 +427,26 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 nome_sel, uf_sel, _ = sel_row
                 _add_municipio_by_name(nome_sel, uf_sel, pncp_df)
 
-    # Lista dos selecionados
+
+    # Lista dos selecionados (com botão de remover “✕”)
+    if st.session_state.selected_municipios:
+        st.sidebar.caption("Selecionados:")
+        # Renderiza cada município com um botão “✕” ao lado para remover
+        keep_list = []
+        for m in st.session_state.selected_municipios:
+            c1, c2 = st.sidebar.columns([0.82, 0.18])
+            with c1:
+                st.markdown(f"- **{m['nome']}** / {m.get('uf','')} (`{m['codigo_pncp']}`)")
+            with c2:
+                if st.button("✕", key=f"rm_{m['codigo_pncp']}", help=f"Remover {m['nome']}"):
+                    # Skip adding this one (remove)
+                    pass
+                else:
+                    keep_list.append(m)
+        if len(keep_list) != len(st.session_state.selected_municipios):
+            st.session_state.selected_municipios = keep_list
+            st.rerun()
+
     if st.session_state.selected_municipios:
         st.sidebar.caption("Selecionados:")
         for m in st.session_state.selected_municipios:
@@ -567,6 +586,30 @@ def main():
         div.block-container { padding-top: 2.1rem; background: #f7faff; padding-bottom: 2rem; }
 
         /* Card premium */
+        /* Botão primário (Pesquisar na sidebar) */
+        section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+          color: #ffffff !important;
+          background: #1f4ba8 !important; /* um pouco mais escuro */
+          border: 1px solid #173a83 !important;
+        }
+        section[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
+          background: #173a83 !important;
+          border-color: #122e67 !important;
+        }
+
+        /* Download button (cor e tamanho reduzido ~60%) */
+        .stDownloadButton > button {
+          color: #ffffff !important;
+          background: #1f4ba8 !important;
+          border: 1px solid #173a83 !important;
+          font-size: 0.7rem !important;
+          padding: 0.28rem 0.6rem !important;
+        }
+        .stDownloadButton > button:hover {
+          background: #173a83 !important;
+          border-color: #122e67 !important;
+        }
+
         .ac-card {
           background: #f8fbff;
           border: 1.25px solid #cad9f3;
