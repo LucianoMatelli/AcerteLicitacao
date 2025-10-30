@@ -642,10 +642,13 @@ def main():
           border:1px solid #96b3e9; color:#0b3b8a;
         }
 
-        /* Apenas altera a cor da fonte do botão "Pesquisar" (escopo restrito) */
+        /* Botão Pesquisar (fonte branca) */
         section[data-testid="stSidebar"] #btnPesquisarWrap .stButton > button {
           color: #ffffff !important;
         }
+
+        /* Checkbox em negrito */
+        div[data-testid="stCheckbox"] label { font-weight: 700; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -736,8 +739,22 @@ def main():
 
     page_df = df.iloc[start:end].copy()
 
-    # ====== CARDS ======
+    # ====== CARDS + checkbox alinhado ao topo direito ======
     for _, row in page_df.iterrows():
+        uid = _uid_from_row(row)
+        current_flag = bool(st.session_state.tr_marks.get(uid, False))
+
+        # Barra superior com checkbox alinhado à direita (simula canto superior direito do card)
+        col_spacer, col_cb = st.columns([6, 1])
+        with col_cb:
+            new_val = st.checkbox("TR Elaborado", value=current_flag, key=f"tr_{uid}")
+        # Se mudou, persiste e refaz layout para refletir badge no título
+        if new_val != current_flag:
+            st.session_state.tr_marks[uid] = bool(new_val)
+            _persist_tr_marks(st.session_state.tr_marks)
+            st.rerun()
+
+        # Agora o card
         link = row.get('Link para o edital','')
         titulo = row.get('Título') or '(Sem título)'
         cidade = row.get('Cidade','')
@@ -750,10 +767,7 @@ def main():
         orgao = row.get('Orgão','')
         proc = (row.get('numero_processo') or '').strip()
 
-        uid = _uid_from_row(row)
-        current_flag = bool(st.session_state.tr_marks.get(uid, False))
-        tr_badge = '<span class="ac-flag">TR Elaborado</span>' if current_flag else ''
-
+        tr_badge = '<span class="ac-flag">TR Elaborado</span>' if new_val else ''
         processo_html = f'<div class="ac-muted">Processo: {proc}</div>' if proc else '<div></div>'
 
         html = f"""
@@ -779,16 +793,6 @@ def main():
         </div>
         """
         st.markdown(html, unsafe_allow_html=True)
-
-        # Linha de ação: checkbox TR Elaborado
-        col_cb, col_sp = st.columns([1, 3])
-        with col_cb:
-            new_val = st.checkbox("TR Elaborado", value=current_flag, key=f"tr_{uid}")
-        # Se mudou, persiste e refaz layout para refletir o badge
-        if new_val != current_flag:
-            st.session_state.tr_marks[uid] = bool(new_val)
-            _persist_tr_marks(st.session_state.tr_marks)
-            st.experimental_rerun()
 
     # Paginação (rodapé)
     col_a2, col_b2, col_c2 = st.columns([1, 2, 1])
