@@ -309,6 +309,45 @@ def _ensure_session_state():
         st.session_state.results_signature = None
 
 # ==========================
+# Coleta agregada (CACHE)
+# ==========================
+@st.cache_data(ttl=900, show_spinner=False)
+def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
+    """Coleção consolidada por assinatura de filtros (municípios, status, q)."""
+    registros: List[Dict] = []
+    codigos = signature.get("municipios", [])
+    status_value = signature.get("status", "")
+    for codigo in codigos:
+        try:
+            itens = consultar_pncp_por_municipio(
+                codigo, status_value=status_value, tam_pagina=TAM_PAGINA_FIXO
+            )
+        except Exception:
+            itens = []
+        for it in itens:
+            registros.append(montar_registro(it, codigo))
+
+    df = pd.DataFrame(registros)
+
+    # Filtro client-side por palavra-chave (título/objeto)
+    q = (signature.get("q") or "").strip()
+    if q and not df.empty:
+        mask = (
+            df["Título"].fillna("").str.contains(q, case=False, na=False)
+            | df["Objeto"].fillna("").str.contains(q, case=False, na=False)
+        )
+        df = df[mask].copy()
+
+    # Ordenação por data de publicação (desc)
+    try:
+        df["_pub_dt"] = pd.to_datetime(df["_pub_raw"], errors="coerce", utc=False)
+    except Exception:
+        df["_pub_dt"] = pd.NaT
+    df.sort_values("_pub_dt", ascending=False, na_position="last", inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    return df
+
+# ==========================
 # Sidebar (reativa, sem form para UF/município)
 # ==========================
 def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
@@ -348,8 +387,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     if uf != st.session_state.uf_prev:
         st.session_state.uf_prev = uf
         st.session_state.municipio_nonce += 1  # invalida/selectbox key para reconstruir widget
-        # opcional: limpar uma pré-seleção de município "virtual"
-        st.session_state.pop("municipio_current_label", None)
+        # ao trocar UF, não limpamos os já selecionados (usuário pode remover manualmente)
 
     # Municípios (reativo; depende da UF)
     st.sidebar.markdown("**Municípios (máx. 25)**")
@@ -376,7 +414,9 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
             index=0,
             key=f"municipio_select_{st.session_state.municipio_nonce}",
         )
-        add_clicked = st.sidebar.button("➕ Adicionar município", use_container_width=True, key=f"add_mun_btn_{st.session_state.municipio_nonce}")
+        add_clicked = st.sidebar.button(
+            "➕ Adicionar município", use_container_width=True, key=f"add_mun_btn_{st.session_state.municipio_nonce}"
+        )
 
     if add_clicked:
         if chosen == "—":
@@ -395,7 +435,9 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 
     # Salvar / Excluir lado a lado
     st.sidebar.subheader("💾 Salvar/Excluir pesquisa salva")
-    save_name = st.sidebar.text_input("Nome da pesquisa", value=st.session_state.sidebar_inputs["save_name"], key="save_name_input")
+    save_name = st.sidebar.text_input(
+        "Nome da pesquisa", value=st.session_state.sidebar_inputs["save_name"], key="save_name_input"
+    )
     col_s1, col_s2 = st.sidebar.columns(2)
     with col_s1:
         salvar = st.button("Salvar", use_container_width=True, key="btn_salvar")
@@ -437,7 +479,11 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
             payload = st.session_state.saved_searches.get(sel, {})
             if payload:
                 st.session_state.sidebar_inputs["palavra_chave"] = payload.get("palavra_chave", "")
-                st.session_state.sidebar_inputs["status_label"] = payload.get("status_label", STATUS_LABELS[0]) if payload.get("status_label", STATUS_LABELS[0]) in STATUS_LABELS else STATUS_LABELS[0]
+                st.session_state.sidebar_inputs["status_label"] = (
+                    payload.get("status_label", STATUS_LABELS[0])
+                    if payload.get("status_label", STATUS_LABELS[0]) in STATUS_LABELS
+                    else STATUS_LABELS[0]
+                )
                 st.session_state.sidebar_inputs["uf"] = payload.get("uf", UF_PLACEHOLDER)
                 st.session_state.uf_prev = st.session_state.sidebar_inputs["uf"]
                 st.session_state.municipio_nonce += 1  # força reconstrução do seletor de município
@@ -500,11 +546,12 @@ def main():
     st.markdown(
         """
         <style>
-        /* Sidebar elegante azul-claro (sutil e legível) — +20% de largura */
+        /* Sidebar elegante azul-claro (sutil e legível) — ~20% mais larga */
         section[data-testid="stSidebar"] {
           background: #eef4ff !important;
           border-right: 1px solid #dfe8ff;
-          width: 360px !important;   /* ~20% maior que ~300px */
+          min-width: 360px !important;
+          max-width: 360px !important;
         }
         section[data-testid="stSidebar"] * { color: #112a52 !important; }
         section[data-testid="stSidebar"] input,
