@@ -608,7 +608,7 @@ def main():
 
         /* Apenas altera a cor da fonte do botão "Pesquisar" (escopo restrito) */
         section[data-testid="stSidebar"] #btnPesquisarWrap .stButton > button {
-          color: #ffffff !important;
+          color: #F2F5F7 !important;
         }
         </style>
         """,
