@@ -427,8 +427,6 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 nome_sel, uf_sel, _ = sel_row
                 _add_municipio_by_name(nome_sel, uf_sel, pncp_df)
 
-
-
     # Lista dos selecionados (com botão de remover “✕”)
     if st.session_state.selected_municipios:
         st.sidebar.caption("Selecionados:")
@@ -445,7 +443,8 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
         if len(keep_list) != len(st.session_state.selected_municipios):
             st.session_state.selected_municipios = keep_list
             st.rerun()
-        # Salvar / Excluir lado a lado
+
+    # Salvar / Excluir lado a lado
     st.sidebar.subheader("💾 Salvar/Excluir pesquisa salva")
     save_name = st.sidebar.text_input(
         "Nome da pesquisa", value=st.session_state.sidebar_inputs["save_name"], key="save_name_input"
@@ -512,7 +511,11 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     st.session_state.sidebar_inputs["selected_saved"] = selected_saved
 
     # Botão principal — ao final e com validação de UF obrigatória
-    disparar_busca = st.sidebar.button("🔍 Pesquisar", use_container_width=True, type="primary", key="btn_pesquisar")
+    # Wrapper para escopar o CSS só neste botão; texto sem emoji e fonte branca via CSS
+    st.sidebar.markdown('<div id="btnPesquisarWrap">', unsafe_allow_html=True)
+    disparar_busca = st.sidebar.button("Pesquisar", use_container_width=True, type="primary", key="btn_pesquisar")
+    st.sidebar.markdown("</div>", unsafe_allow_html=True)
+
     if disparar_busca and uf == UF_PLACEHOLDER:
         st.sidebar.error("Selecione uma UF para habilitar a pesquisa.")
         disparar_busca = False
@@ -579,30 +582,6 @@ def main():
         div.block-container { padding-top: 2.1rem; background: #f7faff; padding-bottom: 2rem; }
 
         /* Card premium */
-        /* Botão primário (Pesquisar na sidebar) */
-        section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
-          color: #ffffff !important;
-          background: #1f4ba8 !important; /* um pouco mais escuro */
-          border: 1px solid #173a83 !important;
-        }
-        section[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
-          background: #173a83 !important;
-          border-color: #122e67 !important;
-        }
-
-        /* Download button (cor e tamanho reduzido ~60%) */
-        .stDownloadButton > button {
-          color: #ffffff !important;
-          background: #1f4ba8 !important;
-          border: 1px solid #173a83 !important;
-          font-size: 0.7rem !important;
-          padding: 0.28rem 0.6rem !important;
-        }
-        .stDownloadButton > button:hover {
-          background: #173a83 !important;
-          border-color: #122e67 !important;
-        }
-
         .ac-card {
           background: #f8fbff;
           border: 1.25px solid #cad9f3;
@@ -625,6 +604,11 @@ def main():
         .ac-link {
           text-decoration:none; padding:0.46rem 0.85rem; border-radius:10px;
           border:1px solid #96b3e9; color:#0b3b8a;
+        }
+
+        /* Apenas altera a cor da fonte do botão "Pesquisar" (escopo restrito) */
+        section[data-testid="stSidebar"] #btnPesquisarWrap .stButton > button {
+          color: #ffffff !important;
         }
         </style>
         """,
