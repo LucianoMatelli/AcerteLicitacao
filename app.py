@@ -580,7 +580,10 @@ def main():
 
         /* Card premium */
         /* Botão primário (Pesquisar na sidebar) */
-        section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+        section[data-testid="stSidebar"] .stButton > button[kind="primary"],
+section[data-testid="stSidebar"] .stButton > button[data-testid="baseButton-primary"],
+section[data-testid="stSidebar"] .stButton > button:not(:disabled) {
+
           color: #ffffff !important;
           background: #1f4ba8 !important; /* um pouco mais escuro */
           border: 1px solid #173a83 !important;
@@ -591,12 +594,12 @@ def main():
         }
 
         /* Download button (cor e tamanho reduzido ~60%) */
-        .stDownloadButton > button {
+        .stDownloadButton > button, .stDownloadButton button {
           color: #ffffff !important;
           background: #1f4ba8 !important;
           border: 1px solid #173a83 !important;
           font-size: 0.7rem !important;
-          padding: 0.28rem 0.6rem !important;
+          padding: 0.28rem 0.35rem !important;
         }
         .stDownloadButton > button:hover {
           background: #173a83 !important;
