@@ -122,9 +122,7 @@ def _parse_valor_number(x) -> Optional[float]:
     s = str(x).strip()
     if not s:
         return None
-    # remove currency and spaces
     s = re.sub(r"[^\d,.\-]", "", s)
-    # heuristic: if comma is decimal separator
     if "," in s and s.rfind(",") > s.rfind("."):
         s = s.replace(".", "").replace(",", ".")
     try:
@@ -250,7 +248,6 @@ def montar_registro(item: Dict, municipio_codigo: str) -> Dict:
     pub_raw = item.get("data_publicacao_pncp") or item.get("data") or item.get("dataPublicacao") or ""
     fim_raw = item.get("data_fim_vigencia") or item.get("fimEnvioProposta") or ""
 
-    # Ampliar busca de número de processo (vários backends usam chaves diferentes)
     processo = _primeiro_valor(
         item.get("numeroProcesso"),
         item.get("processo"),
@@ -282,7 +279,6 @@ def montar_registro(item: Dict, municipio_codigo: str) -> Dict:
         "numero_processo": str(processo or "").strip(),
         "_pub_raw": pub_raw,
         "_fim_raw": fim_raw,
-        # campos que podem existir no search (quando muito sortudos)
         "_valor_estimado_search": item.get("valor_estimado_total") or item.get("valorTotalEstimado") or item.get("valorEstimado") or item.get("valor") or None,
         "_orgao_cnpj": item.get("orgao_cnpj") or item.get("orgaoCnpj") or "",
         "_ano": item.get("ano") or "",
@@ -323,8 +319,6 @@ def _ensure_session_state():
             "selected_saved": None,
             "enriquecer_valor": False,
         }
-    if "temp_mun_choice" not in st.session_state:
-        st.session_state.temp_mun_choice = None  # label IBGE atualmente selecionado
     if "card_page" not in st.session_state:
         st.session_state.card_page = 1
     if "page_size_cards" not in st.session_state:
@@ -339,7 +333,7 @@ def _build_signature(palavra_chave: str, status_value: str, enriquecer: bool) ->
         "municipios": [m["codigo_pncp"] for m in st.session_state.selected_municipios],
         "status": status_value or "",
         "q": (palavra_chave or "").strip().lower(),
-        "enriquecer": bool(enriquecer),  # para cachear também a decisão de enriquecer
+        "enriquecer": bool(enriquecer),
     }
 
 # ==========================
@@ -368,7 +362,6 @@ def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
         )
         df = df[mask].copy()
 
-    # coluna técnica para ordenar por data
     try:
         df["_pub_dt"] = pd.to_datetime(df["_pub_raw"], errors="coerce", utc=False)
     except Exception:
@@ -376,7 +369,6 @@ def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
     df.sort_values("_pub_dt", ascending=False, na_position="last", inplace=True)
     df.reset_index(drop=True, inplace=True)
 
-    # Enriquecimento opcional
     if signature.get("enriquecer") and not df.empty:
         df["Valor estimado (R$)"] = None
         for idx, row in df.iterrows():
@@ -482,7 +474,7 @@ def _buscar_valor_estimado_por_det(row: pd.Series) -> Optional[float]:
     return None
 
 # ==========================
-# Sidebar (em formulário) — isola a coleta
+# Sidebar (restaurada ao layout da versão anexa) — tudo em um único form
 # ==========================
 def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     st.sidebar.header("🔎 Filtros")
@@ -511,7 +503,7 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 
         uf = st.selectbox("Estado (UF)", ufs, index=ufs.index(st.session_state.sidebar_inputs["uf"]))
 
-        # Municípios (IBGE-like → PNCP)
+        # Municípios (IBGE-like → PNCP), com "➕ Adicionar município" DENTRO do form
         st.markdown("**Municípios (máx. 25)**")
         if ibge_df is not None:
             df_show = ibge_df if uf == "Todos" else ibge_df[ibge_df["uf"] == uf]
@@ -527,10 +519,18 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
             mun_options = df_temp[["nome", "uf", "label"]].values.tolist()
 
         labels = ["—"] + [row[2] for row in mun_options]
-        # Guardar escolha temporária no estado (para usar fora do form)
-        temp_choice = st.selectbox("Adicionar município (IBGE)", labels, index=0, key="temp_mun_choice")
+        chosen = st.selectbox("Adicionar município (IBGE)", labels, index=0)
+        if chosen != "—":
+            sel_row = next((row for row in mun_options if row[2] == chosen), None)
+            if sel_row and st.form_submit_button("➕ Adicionar município"):
+                nome_sel, uf_sel, _ = sel_row
+                _add_municipio_by_name(nome_sel, uf_sel, pncp_df)
+                st.session_state.sidebar_inputs["uf"] = uf  # manter UF selecionada
+                st.session_state.sidebar_inputs["palavra_chave"] = palavra
+                st.session_state.sidebar_inputs["status_label"] = status_label
+                st.rerun()
 
-        # Lista de selecionados (render somente texto aqui; botões de remoção ficam fora do form)
+        # Lista dos selecionados (só exibição; remoção pode ser feita salvando nova pesquisa sem o item)
         if st.session_state.selected_municipios:
             st.caption("Selecionados:")
             for m in st.session_state.selected_municipios:
@@ -548,7 +548,7 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
         selected_saved = st.selectbox("Carregar pesquisa", ["—"] + saved_names, index=0)
         carregar = st.form_submit_button("Carregar")
 
-        # Enriquecimento
+        # Enriquecimento (mantido, mas discreto, ainda dentro do form)
         enriquecer_valor = st.checkbox(
             "Incluir Valor Estimado (pode ser mais lento)",
             value=st.session_state.sidebar_inputs.get("enriquecer_valor", False)
@@ -557,42 +557,7 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
         # Botão principal — submit do form
         disparar_busca = st.form_submit_button("🔍 Pesquisar")
 
-    # AÇÕES fora do form
-    # Botão "Adicionar município" SEM depender do submit do form
-    if st.sidebar.button("➕ Adicionar município", use_container_width=True):
-        chosen = st.session_state.get("temp_mun_choice") or "—"
-        if chosen != "—":
-            # Precisamos reconstituir a linha selecionada
-            if ibge_df is not None:
-                source_df = ibge_df if st.session_state.sidebar_inputs["uf"] == "Todos" else ibge_df[ibge_df["uf"] == st.session_state.sidebar_inputs["uf"]]
-                source_df = source_df.copy()
-                source_df["label"] = source_df["municipio"] + " / " + source_df["uf"]
-                mun_options_now = source_df[["municipio", "uf", "label"]].values.tolist()
-            else:
-                df_temp = pncp_df.copy()
-                if st.session_state.sidebar_inputs["uf"] != "Todos" and "uf" in df_temp.columns:
-                    df_temp = df_temp[df_temp["uf"].str.upper() == st.session_state.sidebar_inputs["uf"].upper()]
-                df_temp["uf"] = df_temp.get("uf", "").astype(str).replace({"nan": ""})
-                df_temp["label"] = df_temp["nome"] + " / " + df_temp["uf"]
-                mun_options_now = df_temp[["nome", "uf", "label"]].values.tolist()
-
-            sel_row = next((row for row in mun_options_now if row[2] == chosen), None)
-            if sel_row:
-                nome_sel, uf_sel, _ = sel_row
-                _add_municipio_by_name(nome_sel, uf_sel, pncp_df)
-                st.success(f"Município '{nome_sel} / {uf_sel}' adicionado.")
-                st.rerun()
-        else:
-            st.warning("Selecione um município na lista antes de adicionar.")
-
-    # Remover municípios (fora do form, com botões individuais)
-    if st.session_state.selected_municipios:
-        st.sidebar.subheader("Remover município")
-        for m in list(st.session_state.selected_municipios):
-            if st.sidebar.button(f"✖ Remover {m['nome']}", key=f"rm_{m['codigo_pncp']}"):
-                _remove_municipio(m["codigo_pncp"])
-                st.rerun()
-
+    # AÇÕES fora do form (igual versão anexa: apenas salvar/excluir/carregar persistência)
     if excluir:
         name = save_name.strip()
         if name and name in st.session_state.saved_searches:
@@ -679,8 +644,8 @@ def main():
     st.title("📑 Acerte Licitações — O seu Buscador de Editais")
     st.caption("Fluxo funcional: /api/search (PNCP) + seleção IBGE→PNCP. Máx. 25 municípios.")
 
-    # CSS sutil para sidebar e cards
-    st.markdown("""
+    # CSS (restaurado do anexo, com cards sutis azuis)
+    st.markdown(\"\"\"
     <style>
     section[data-testid="stSidebar"] {
       background: #eef4ff !important;
@@ -709,7 +674,7 @@ def main():
     .ac-muted { color: #44516a; font-size: 0.92rem; }
     .ac-card a { color: #0b3b8a; border-color: #96b3e9 !important; }
     </style>
-    """, unsafe_allow_html=True)
+    \"\"\", unsafe_allow_html=True)
 
     _ensure_session_state()
 
@@ -721,7 +686,7 @@ def main():
         st.stop()
     ibge_df = load_ibge_catalog()
 
-    # Sidebar em formulário
+    # Sidebar em formulário (restaurada)
     disparar_busca = _sidebar_form(pncp_df, ibge_df)
 
     # Monta assinatura e decide origem dos dados (cache vs memória)
@@ -750,7 +715,6 @@ def main():
             st.stop()
         df = pd.DataFrame(st.session_state.results_df)
 
-        # Se filtros mudaram, apenas sinaliza (não coleta até clicar Pesquisar)
         if st.session_state.results_signature and signature != st.session_state.results_signature:
             st.warning("Filtros alterados após a última coleta. Clique em **Pesquisar** para atualizar os resultados.")
 
@@ -760,7 +724,6 @@ def main():
         st.info("Nenhum resultado encontrado com os critérios atuais.")
         return
 
-    # Ordenação por data já aplicada em coletar_por_assinatura, mas reforçamos a coluna técnica se faltar
     if "_pub_dt" not in df.columns:
         try:
             df["_pub_dt"] = pd.to_datetime(df["_pub_raw"], errors="coerce", utc=False)
@@ -769,7 +732,6 @@ def main():
         df.sort_values("_pub_dt", ascending=False, na_position="last", inplace=True)
         df.reset_index(drop=True, inplace=True)
 
-    # Controle de paginação (não dispara coleta)
     page_size_cards = st.selectbox(
         "Itens por página",
         [10, 20, 50],
@@ -819,7 +781,7 @@ def main():
         valor_html = ""
         if valor_est is not None and valor_est != "":
             try:
-                valor_html = f"<div><strong>Valor estimado:</strong> R$ {float(valor_est):,.2f}</div>".replace(",", "X").replace(".", ",").replace("X", ".")
+                valor_html = f"<div><strong>Valor estimado:</strong> R$ {float(valor_est):,.2f}</div>".replace(\",\", \"X\").replace(\".\", \",\").replace(\"X\", \".\")
             except Exception:
                 valor_html = f"<div><strong>Valor estimado:</strong> {valor_est}</div>"
 
