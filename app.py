@@ -8,7 +8,7 @@ import json
 import time
 import unicodedata
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 
 import pandas as pd
 import requests
@@ -40,12 +40,8 @@ SAVED_SEARCHES_PATH = os.path.join(BASE_DIR, "saved_searches.json")
 
 ORIGIN = "https://pncp.gov.br"
 BASE_API = ORIGIN + "/api/search"
-UA = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122 Safari/537.36"
-)
 HEADERS = {
-    "User-Agent": UA,
+    "User-Agent": "AcerteLicitacoes/1.0 (+streamlit)",
     "Referer": "https://pncp.gov.br/app/editais",
     "Accept-Language": "pt-BR,pt;q=0.9",
 }
@@ -129,10 +125,10 @@ def load_municipios_pncp() -> pd.DataFrame:
     last_err = None
 
     def _guess_columns(df: pd.DataFrame):
-        norm_map = {_norm(c): c for c in df.columns}
-        col_nome = norm_map.get("municipio") or norm_map.get("nome") or ("Municipio" if "Municipio" in df.columns else None)
-        col_codigo = norm_map.get("id") or norm_map.get("codigo") or ("id" if "id" in df.columns else None)
-        col_uf = norm_map.get("uf") or norm_map.get("estado") or None
+        cols_norm = {_norm(c): c for c in df.columns}
+        col_nome = cols_norm.get("municipio") or cols_norm.get("nome") or ("Municipio" if "Municipio" in df.columns else None)
+        col_codigo = cols_norm.get("id") or cols_norm.get("codigo") or ("id" if "id" in df.columns else None)
+        col_uf = cols_norm.get("uf") or cols_norm.get("estado") or None
         return col_nome, col_codigo, col_uf
 
     for path in CSV_PNCP_PATHS:
@@ -242,7 +238,7 @@ def montar_registro(item: Dict, municipio_codigo: str) -> Dict:
         "Publicação": _fmt_dt_iso_to_br(pub_raw),
         "Fim do envio de proposta": _fmt_dt_iso_to_br(fim_raw),
         "numero_processo": item.get("numeroProcesso") or item.get("processo") or "",
-        # Raw fields for sorting/pagination logic
+        # colunas auxiliares (não vão para o XLSX)
         "_pub_raw": pub_raw,
         "_fim_raw": fim_raw,
     }
@@ -276,6 +272,10 @@ def _ensure_session_state():
             "save_name": "",
             "selected_saved": None,
         }
+    if "card_page" not in st.session_state:
+        st.session_state.card_page = 1
+    if "page_size_cards" not in st.session_state:
+        st.session_state.page_size_cards = 10
 
 def _add_municipio_by_name(nome_municipio: str, uf: Optional[str], pncp_df: pd.DataFrame) -> None:
     if not nome_municipio:
@@ -314,7 +314,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
         value=st.session_state.sidebar_inputs["palavra_chave"]
     )
 
-    # 2) Status (radio) com default "A Receber/Recebendo Proposta"
+    # 2) Status (radio) default “A Receber/Recebendo Proposta”
     st.session_state.sidebar_inputs["status_label"] = st.sidebar.radio(
         "Status",
         STATUS_LABELS,
@@ -336,6 +336,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     st.sidebar.markdown("**Municípios (máx. 25)**")
     if ibge_df is not None:
         df_show = ibge_df if st.session_state.sidebar_inputs["uf"] == "Todos" else ibge_df[ibge_df["uf"] == st.session_state.sidebar_inputs["uf"]]
+        df_show = df_show.copy()
         df_show["label"] = df_show["municipio"] + " / " + df_show["uf"]
         mun_options = df_show[["municipio", "uf", "label"]].values.tolist()
     else:
@@ -424,6 +425,46 @@ def main():
     st.title("📑 Acerte Licitações — O seu Buscador de Editais")
     st.caption("Fluxo funcional: /api/search (PNCP) + seleção IBGE→PNCP. Máx. 25 municípios.")
 
+    # CSS sutil: sidebar clara; evitar sobreposição do header; cards em azul suave
+    st.markdown("""
+    <style>
+    /* Subtle sidebar theme */
+    section[data-testid="stSidebar"] {
+      background: #eef4ff !important;
+      border-right: 1px solid #dfe8ff;
+    }
+    section[data-testid="stSidebar"] * { color: #0f2240 !important; }
+    section[data-testid="stSidebar"] input,
+    section[data-testid="stSidebar"] textarea {
+      background: #ffffff !important;
+      color: #0f2240 !important;
+      border: 1px solid #b7c6e6 !important;
+      box-shadow: none !important;
+    }
+    section[data-testid="stSidebar"] input::placeholder,
+    section[data-testid="stSidebar"] textarea::placeholder {
+      color: #5a6a8a !important; opacity: .9;
+    }
+
+    /* Main header & container spacing: avoid overlap */
+    header[data-testid="stHeader"] { background: transparent !important; box-shadow: none !important; height: 3rem; }
+    div.block-container { padding-top: 2.25rem; background: #f9fbff; padding-bottom: 2rem; }
+
+    /* Cards */
+    .ac-card {
+      background: #f7fbff;
+      border: 1.5px solid #cfdcf6;
+      border-radius: 18px;
+      padding: 1rem 1.2rem;
+      margin-bottom: 0.9rem;
+      box-shadow: 0 1px 5px rgba(16, 38, 95, 0.05);
+    }
+    .ac-card h3 { margin-top: 0; margin-bottom: 0.25rem; font-size: 1.06rem; color: #0b1b36; }
+    .ac-muted { color: #44516a; font-size: 0.92rem; }
+    .ac-card a { color: #0b3b8a; border-color: #96b3e9 !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
     # Estado
     _ensure_session_state()
 
@@ -438,15 +479,6 @@ def main():
 
     # Sidebar
     disparar_busca = _sidebar(pncp_df, ibge_df)
-
-    # Diagnóstico (opcional)
-    with st.expander("Configuração atual", expanded=False):
-        st.write({
-            "palavra_chave": st.session_state.sidebar_inputs["palavra_chave"],
-            "status_label": st.session_state.sidebar_inputs["status_label"],
-            "uf": st.session_state.sidebar_inputs["uf"],
-            "municipios": st.session_state.selected_municipios,
-        })
 
     # Execução
     if disparar_busca:
@@ -472,7 +504,6 @@ def main():
                 registros.append(montar_registro(it, m["codigo_pncp"]))
 
         progress.empty()
-
         df = pd.DataFrame(registros)
 
         # Filtro por palavra-chave (client-side no título/objeto)
@@ -483,42 +514,110 @@ def main():
             )
             df = df[mask].copy()
 
-        # Ordenação por data
-        if not df.empty and "Publicação" in df.columns:
-            try:
-                _tmp = pd.to_datetime(df["Publicação"], format="%d/%m/%Y %H:%M", errors="coerce")
-                df = df.assign(_ord=_tmp).sort_values("_ord", ascending=False, na_position="last").drop(columns=["_ord"])
-            except Exception:
-                pass
-
-        # Colunas e exibição
-        desired_order = [
-            "Cidade", "UF", "Título", "Objeto", "Link para o edital",
-            "Modalidade", "Tipo", "Tipo (documento)", "Orgão", "Unidade",
-            "Esfera", "Publicação", "Fim do envio de proposta"
-        ]
-        if not df.empty:
-            df = df[[c for c in desired_order if c in df.columns]]
-
         st.subheader(f"Resultados ({len(df)})")
         if df.empty:
             st.info("Nenhum resultado encontrado com os critérios atuais.")
         else:
-            st.dataframe(
-                df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Link para o edital": st.column_config.LinkColumn(
-                        "Link para o edital",
-                        display_text="Abrir edital"
-                    )
-                },
+            # Ordenação correta por data de publicação (desc)
+            try:
+                df["_pub_dt"] = pd.to_datetime(df["_pub_raw"], errors="coerce", utc=False)
+            except Exception:
+                df["_pub_dt"] = pd.NaT
+            df = df.sort_values("_pub_dt", ascending=False, na_position="last").reset_index(drop=True)
+
+            # Tamanho da página controlado pelo widget (NÃO escrever no session_state com a mesma key!)
+            page_size_cards = st.selectbox(
+                "Itens por página",
+                [10, 20, 50],
+                index=[10, 20, 50].index(st.session_state.get("page_size_cards", 10)) if st.session_state.get("page_size_cards", 10) in [10, 20, 50] else 0,
+                key="page_size_cards",
             )
-            # Download XLSX
+
+            total_items = len(df)
+            total_pages = max(1, (total_items + page_size_cards - 1) // page_size_cards)
+
+            # Controles de paginação (topo)
+            col_a, col_b, col_c = st.columns([1, 2, 1])
+            with col_a:
+                prev_clicked = st.button("◀ Anterior", key="prev_top", disabled=(st.session_state.get("card_page", 1) <= 1))
+            with col_c:
+                next_clicked = st.button("Próxima ▶", key="next_top", disabled=(st.session_state.get("card_page", 1) >= total_pages))
+
+            # Atualiza página e faz clamp
+            if "card_page" not in st.session_state:
+                st.session_state.card_page = 1
+            if prev_clicked:
+                st.session_state.card_page = max(1, st.session_state.card_page - 1)
+            if next_clicked:
+                st.session_state.card_page = min(total_pages, st.session_state.card_page + 1)
+            if st.session_state.card_page > total_pages:
+                st.session_state.card_page = total_pages
+
+            start = (st.session_state.card_page - 1) * page_size_cards
+            end = start + page_size_cards
+            with col_b:
+                st.markdown(f"**Página {st.session_state.card_page} de {total_pages}**")
+
+            page_df = df.iloc[start:end].copy()
+
+            # ====== CARDS ======
+            for _, row in page_df.iterrows():
+                link = row.get('Link para o edital','')
+                titulo = row.get('Título') or '(Sem título)'
+                cidade = row.get('Cidade','')
+                uf = row.get('UF','')
+                pub = row.get('Publicação','')
+                fim = row.get('Fim do envio de proposta','')
+                objeto = row.get('Objeto','')
+                modalidade = row.get('Modalidade','')
+                tipo = row.get('Tipo','')
+                orgao = row.get('Orgão','')
+                proc = row.get('numero_processo','')
+
+                html = f'''
+                <div class="ac-card">
+                    <h3>{titulo}</h3>
+                    <div class="ac-muted">
+                        <strong>Cidade/UF:</strong> {cidade} / {uf} &nbsp;|&nbsp;
+                        <strong>Publicação:</strong> {pub} &nbsp;|&nbsp;
+                        <strong>Fim do envio:</strong> {fim}
+                    </div>
+                    <div style="margin-top:0.5rem;"><strong>Objeto:</strong> {objeto}</div>
+                    <div style="display:flex; gap:1rem; margin-top:0.5rem; flex-wrap:wrap;">
+                        <div><strong>Modalidade:</strong> {modalidade}</div>
+                        <div><strong>Tipo:</strong> {tipo}</div>
+                        <div><strong>Órgão:</strong> {orgao}</div>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.6rem;">
+                        <div class="ac-muted">Processo: {proc}</div>
+                        {f'<a href="{link}" target="_blank" style="text-decoration:none; padding:0.45rem 0.8rem; border-radius:10px; border:1px solid #96b3e9;">Abrir edital</a>' if isinstance(link, str) and link else ''}
+                    </div>
+                </div>
+                '''
+                st.markdown(html, unsafe_allow_html=True)
+
+            # Controles de paginação (rodapé)
+            col_a2, col_b2, col_c2 = st.columns([1, 2, 1])
+            with col_a2:
+                prev_clicked2 = st.button("◀ Anterior", key="prev_bottom", disabled=(st.session_state.card_page <= 1))
+            with col_c2:
+                next_clicked2 = st.button("Próxima ▶", key="next_bottom", disabled=(st.session_state.card_page >= total_pages))
+            if prev_clicked2:
+                st.session_state.card_page = max(1, st.session_state.card_page - 1)
+            if next_clicked2:
+                st.session_state.card_page = min(total_pages, st.session_state.card_page + 1)
+            if st.session_state.card_page > total_pages:
+                st.session_state.card_page = total_pages
+            with col_b2:
+                st.markdown(f"**Página {st.session_state.card_page} de {total_pages}**")
+
+            st.divider()
+
+            # Download XLSX (sem colunas auxiliares)
+            export_df = df.drop(columns=[c for c in ["_pub_raw", "_fim_raw", "_pub_dt"] if c in df.columns]).copy()
             xlsx_buf = io.BytesIO()
             with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as wr:
-                df.to_excel(wr, index=False, sheet_name="PNCP")
+                export_df.to_excel(wr, index=False, sheet_name="PNCP")
             xlsx_bytes = xlsx_buf.getvalue()
 
             st.markdown("### ⬇️ Baixar planilha")
