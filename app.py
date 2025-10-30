@@ -60,6 +60,12 @@ STATUS_MAP = {
     "Encerradas": "encerrado",
     "Todos": "",
 }
+def _build_signature(palavra_chave: str, status_value: str) -> Dict:
+    return {
+        "municipios": [m["codigo_pncp"] for m in st.session_state.selected_municipios],
+        "status": status_value or "",
+        "q": (palavra_chave or "").strip().lower(),
+    }
 
 # ==========================
 # Utilitários
@@ -276,6 +282,10 @@ def _ensure_session_state():
         st.session_state.card_page = 1
     if "page_size_cards" not in st.session_state:
         st.session_state.page_size_cards = 10
+    if "results_df" not in st.session_state:
+        st.session_state.results_df = None  # armazena lista de dicts
+    if "results_signature" not in st.session_state:
+        st.session_state.results_signature = None
 
 def _add_municipio_by_name(nome_municipio: str, uf: Optional[str], pncp_df: pd.DataFrame) -> None:
     if not nome_municipio:
