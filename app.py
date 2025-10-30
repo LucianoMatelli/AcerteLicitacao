@@ -18,7 +18,7 @@ import streamlit as st
 # Configuração de página
 # ==========================
 st.set_page_config(
-    page_title="📑 Acerte Licitações — O seu Buscador de Editais",
+    page_title="Acerte Licitações - O seu Buscador de Editais",
     page_icon="📑",
     layout="wide",
 )
