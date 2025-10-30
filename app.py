@@ -136,7 +136,7 @@ def _parse_valor_number(x) -> Optional[float]:
 @st.cache_data(show_spinner=False)
 def load_municipios_pncp() -> pd.DataFrame:
     encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252"]
-    seps = [",", ";", "\t", "|"]
+    seps = [",", ";", "	", "|"]
     last_err = None
 
     def _guess_columns(df: pd.DataFrame):
@@ -175,7 +175,7 @@ def load_municipios_pncp() -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def load_ibge_catalog() -> Optional[pd.DataFrame]:
     encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252"]
-    seps = [",", ";", "\t", "|"]
+    seps = [",", ";", "	", "|"]
     for path in CSV_IBGE_PATHS:
         if os.path.exists(path):
             for enc in encodings:
@@ -530,7 +530,7 @@ def _sidebar_form(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 st.session_state.sidebar_inputs["status_label"] = status_label
                 st.rerun()
 
-        # Lista dos selecionados (só exibição; remoção pode ser feita salvando nova pesquisa sem o item)
+        # Lista dos selecionados (só exibição)
         if st.session_state.selected_municipios:
             st.caption("Selecionados:")
             for m in st.session_state.selected_municipios:
@@ -645,7 +645,7 @@ def main():
     st.caption("Fluxo funcional: /api/search (PNCP) + seleção IBGE→PNCP. Máx. 25 municípios.")
 
     # CSS (restaurado do anexo, com cards sutis azuis)
-    st.markdown(\"\"\"
+    st.markdown("""
     <style>
     section[data-testid="stSidebar"] {
       background: #eef4ff !important;
@@ -674,7 +674,7 @@ def main():
     .ac-muted { color: #44516a; font-size: 0.92rem; }
     .ac-card a { color: #0b3b8a; border-color: #96b3e9 !important; }
     </style>
-    \"\"\", unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
     _ensure_session_state()
 
@@ -781,7 +781,7 @@ def main():
         valor_html = ""
         if valor_est is not None and valor_est != "":
             try:
-                valor_html = f"<div><strong>Valor estimado:</strong> R$ {float(valor_est):,.2f}</div>".replace(\",\", \"X\").replace(\".\", \",\").replace(\"X\", \".\")
+                valor_html = f"<div><strong>Valor estimado:</strong> R$ {float(valor_est):,.2f}</div>".replace(",", "X").replace(".", ",").replace("X", ".")
             except Exception:
                 valor_html = f"<div><strong>Valor estimado:</strong> {valor_est}</div>"
 
