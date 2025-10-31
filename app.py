@@ -38,8 +38,8 @@ CSV_IBGE_PATHS = [
     "IBGE_Municipios.csv",
 ]
 SAVED_SEARCHES_PATH = os.path.join(BASE_DIR, "saved_searches.json")
-SAVED_TR_PATH = os.path.join(BASE_DIR, "tr_marks.json")          # TR Elaborado
-SAVED_NA_PATH = os.path.join(BASE_DIR, "na_marks.json")          # Não Atende
+SAVED_TR_PATH = os.path.join(BASE_DIR, "tr_marks.json")
+SAVED_NA_PATH = os.path.join(BASE_DIR, "na_marks.json")
 
 ORIGIN = "https://pncp.gov.br"
 BASE_API = ORIGIN + "/api/search"
@@ -48,7 +48,7 @@ HEADERS = {
     "Referer": "https://pncp.gov.br/app/editais",
     "Accept-Language": "pt-BR,pt;q=0.9",
 }
-TAM_PAGINA_FIXO = 100  # parâmetro fixo de coleta
+TAM_PAGINA_FIXO = 100
 
 STATUS_LABELS = [
     "A Receber/Recebendo Proposta",
@@ -324,13 +324,13 @@ def _persist_marks(path: str, d: Dict[str, bool]):
 
 def _ensure_session_state():
     if "selected_municipios" not in st.session_state:
-        st.session_state.selected_municipios = []  # list[{codigo_pncp,nome,uf}]
+        st.session_state.selected_municipios = []
     if "saved_searches" not in st.session_state:
         st.session_state.saved_searches = _load_saved_searches()
     if "sidebar_inputs" not in st.session_state:
         st.session_state.sidebar_inputs = {
             "palavra_chave": "",
-            "status_label": STATUS_LABELS[0],  # default
+            "status_label": STATUS_LABELS[0],
             "uf": UF_PLACEHOLDER,
             "save_name": "",
             "selected_saved": None,
@@ -344,7 +344,7 @@ def _ensure_session_state():
     if "page_size_cards" not in st.session_state:
         st.session_state.page_size_cards = 10
     if "results_df" not in st.session_state:
-        st.session_state.results_df = None  # list[dict]
+        st.session_state.results_df = None
     if "results_signature" not in st.session_state:
         st.session_state.results_signature = None
     if "tr_marks" not in st.session_state:
@@ -576,7 +576,7 @@ def _add_municipio_by_name(nome_municipio: str, uf: Optional[str], pncp_df: pd.D
     sel.append({"codigo_pncp": codigo, "nome": nome, "uf": uf_val})
 
 # ==========================
-# Callbacks de paginação (garantem execução antes do slice)
+# Callbacks de paginação
 # ==========================
 def _cb_prev(total_pages: int):
     st.session_state.card_page = max(1, int(st.session_state.get("card_page", 1)) - 1)
@@ -594,7 +594,7 @@ def main():
     st.title("📑 Acerte Licitações — O seu Buscador de Editais")
     st.caption("Selecione os municípios e acompanhe seus TRs.")
 
-    # ======== CSS mínimo (mantido) ========
+    # CSS mínimo para manter visual
     st.markdown(
         """
         <style>
@@ -663,17 +663,18 @@ def main():
         df.sort_values("_pub_dt", ascending=False, na_position="last", inplace=True)
         df.reset_index(drop=True, inplace=True)
 
-    # ===== Paginação: callbacks + slice DEPOIS dos callbacks =====
-    st.session_state.page_size_cards = st.selectbox(
+    # ===== Paginação
+    _ = st.selectbox(
         "Itens por página",
         [10, 20, 50],
         index=[10, 20, 50].index(st.session_state.get("page_size_cards", 10)) if st.session_state.get("page_size_cards", 10) in [10, 20, 50] else 0,
         key="page_size_cards",
         on_change=_cb_page_size_change,
     )
+    page_size_cards = int(st.session_state.get("page_size_cards", 10))
 
     total_items = len(df)
-    total_pages = max(1, (total_items + st.session_state.page_size_cards - 1) // st.session_state.page_size_cards)
+    total_pages = max(1, (total_items + page_size_cards - 1) // page_size_cards)
 
     col_a, col_b, col_c = st.columns([1, 2, 1])
     with col_a:
@@ -685,12 +686,11 @@ def main():
     with col_b:
         st.markdown(f"**Página {st.session_state.get('card_page',1)} de {total_pages}**")
 
-    # Slice após possíveis mudanças via callback
-    start = (st.session_state.get("card_page", 1) - 1) * st.session_state.page_size_cards
-    end = start + st.session_state.page_size_cards
+    start = (st.session_state.get("card_page", 1) - 1) * page_size_cards
+    end = start + page_size_cards
     page_df = df.iloc[start:end].copy()
 
-    # ====== CARDS + checkboxes ======
+    # ====== CARDS ======
     for _, row in page_df.iterrows():
         uid = _uid_from_row(row)
         tr_flag = bool(st.session_state.tr_marks.get(uid, False))
@@ -754,7 +754,7 @@ def main():
         """
         st.markdown(html, unsafe_allow_html=True)
 
-    # Paginação (rodapé) — mesmos callbacks
+    # Paginação (rodapé)
     col_a2, col_b2, col_c2 = st.columns([1, 2, 1])
     with col_a2:
         st.button("◀ Anterior", key="prev_bottom", disabled=(st.session_state.get("card_page", 1) <= 1),
