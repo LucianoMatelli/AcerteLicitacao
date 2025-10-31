@@ -462,7 +462,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 _add_municipio_by_name(nome_sel, uf_sel, pncp_df)
 
     if st.session_state.selected_municipios:
-        st.sidebar.caption("Selecionados:")
+        st.sidebar.caption("Municípios Selecionados:")
         keep_list = []
         for m in st.session_state.selected_municipios:
             c1, c2 = st.sidebar.columns([0.82, 0.18])
