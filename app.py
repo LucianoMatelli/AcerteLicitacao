@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import os
@@ -18,7 +19,7 @@ import streamlit as st
 # Configuração de página
 # ==========================
 st.set_page_config(
-    page_title="Acerte Licitações - O seu Buscador de Editais",
+    page_title="📑 Acerte Licitações — O seu Buscador de Editais",
     page_icon="📑",
     layout="wide",
 )
@@ -37,7 +38,8 @@ CSV_IBGE_PATHS = [
     "IBGE_Municipios.csv",
 ]
 SAVED_SEARCHES_PATH = os.path.join(BASE_DIR, "saved_searches.json")
-SAVED_TR_PATH = os.path.join(BASE_DIR, "tr_marks.json")
+SAVED_TR_PATH = os.path.join(BASE_DIR, "tr_marks.json")          # TR Elaborado
+SAVED_NA_PATH = os.path.join(BASE_DIR, "na_marks.json")          # Não Atende
 
 ORIGIN = "https://pncp.gov.br"
 BASE_API = ORIGIN + "/api/search"
@@ -123,14 +125,23 @@ def _primeiro_valor(*args):
 
 def _uid_from_row(row: Dict) -> str:
     """
-    Gera um identificador estável por edital para marcar 'TR Elaborado'.
-    Preferência: caminho /app/editais/{cnpj}/{ano}/{seq}. Fallback: hash de título+município+data.
+    UID estável para memorizar marcações entre pesquisas:
+    1) orgao_cnpj-ano-numero_sequencial;
+    2) extração do link /app/editais/{cnpj}/{ano}/{seq};
+    3) hash de (titulo + municipio_codigo + _pub_raw + orgao).
     """
+    cnpj = str(row.get("_orgao_cnpj") or "").strip()
+    ano = str(row.get("_ano") or "").strip()
+    seq = str(row.get("_seq") or "").strip()
+    if len(cnpj) == 14 and ano.isdigit() and seq:
+        return f"{cnpj}-{ano}-{seq}"
+
     link = str(row.get("Link para o edital") or "")
     m = re.search(r"/app/editais/(\d{14})/(\d{4})/(\w+)", link)
     if m:
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-    base = f"{row.get('Título','')}-{row.get('municipio_codigo','')}-{row.get('_pub_raw','')}"
+
+    base = f"{row.get('Título','')}-{row.get('municipio_codigo','')}-{row.get('_pub_raw','')}-{row.get('Orgão','')}"
     return hashlib.md5(base.encode("utf-8")).hexdigest()
 
 # ==========================
@@ -258,6 +269,12 @@ def montar_registro(item: Dict, municipio_codigo: str) -> Dict:
         item.get("numeroProcessoAdministrativo"),
     )
 
+    # Guardar campos-chaves para UID estável
+    orgao_cnpj = str(item.get("orgao_cnpj") or "").strip()
+    ano = str(item.get("ano") or "").strip()
+    seq = str(item.get("numero_sequencial") or "").strip()
+    raw_id = str(item.get("id") or item.get("uuid") or "")
+
     return {
         "municipio_codigo": municipio_codigo,
         "Cidade": item.get("municipio_nome", ""),
@@ -275,6 +292,10 @@ def montar_registro(item: Dict, municipio_codigo: str) -> Dict:
         "Fim do envio de proposta": _fmt_dt_iso_to_br(fim_raw),
         "numero_processo": str(processo or "").strip(),
         "_pub_raw": pub_raw,
+        "_orgao_cnpj": orgao_cnpj,
+        "_ano": ano,
+        "_seq": seq,
+        "_id": raw_id,
     }
 
 # ==========================
@@ -296,10 +317,10 @@ def _persist_saved_searches(d: Dict[str, Dict]):
     except Exception as e:
         st.error(f"Falha ao salvar pesquisas: {e}")
 
-def _load_tr_marks() -> Dict[str, bool]:
-    if os.path.exists(SAVED_TR_PATH):
+def _load_marks(path: str) -> Dict[str, bool]:
+    if os.path.exists(path):
         try:
-            with open(SAVED_TR_PATH, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
                     return {str(k): bool(v) for k, v in data.items()}
@@ -307,12 +328,12 @@ def _load_tr_marks() -> Dict[str, bool]:
             pass
     return {}
 
-def _persist_tr_marks(d: Dict[str, bool]):
+def _persist_marks(path: str, d: Dict[str, bool]):
     try:
-        with open(SAVED_TR_PATH, "w", encoding="utf-8") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        st.error(f"Falha ao salvar marcações TR: {e}")
+        st.error(f"Falha ao salvar marcações em {os.path.basename(path)}: {e}")
 
 def _ensure_session_state():
     if "selected_municipios" not in st.session_state:
@@ -340,7 +361,9 @@ def _ensure_session_state():
     if "results_signature" not in st.session_state:
         st.session_state.results_signature = None
     if "tr_marks" not in st.session_state:
-        st.session_state.tr_marks = _load_tr_marks()
+        st.session_state.tr_marks = _load_marks(SAVED_TR_PATH)
+    if "na_marks" not in st.session_state:
+        st.session_state.na_marks = _load_marks(SAVED_NA_PATH)
 
 # ==========================
 # Coleta agregada (CACHE)
@@ -543,7 +566,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     st.session_state.sidebar_inputs["save_name"] = save_name
     st.session_state.sidebar_inputs["selected_saved"] = selected_saved
 
-    # Botão principal — ao final e com validação de UF obrigatória
+    # Botão principal
     st.sidebar.markdown('<div id="btnPesquisarWrap">', unsafe_allow_html=True)
     disparar_busca = st.sidebar.button("Pesquisar", use_container_width=True, type="primary", key="btn_pesquisar")
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
@@ -587,13 +610,12 @@ def _add_municipio_by_name(nome_municipio: str, uf: Optional[str], pncp_df: pd.D
 # ==========================
 def main():
     st.title("📑 Acerte Licitações — O seu Buscador de Editais")
-    st.caption("Selecione os municípios que deseja e o buscador da Acerte Licitações irá trazer os editais.")
+    st.caption("Selecione os municípios e acompanhe seus TRs.")
 
-    # ======== CSS Premium ========
+    # ======== CSS ========
     st.markdown(
         """
         <style>
-        /* Sidebar elegante azul-claro (sutil e legível) — ~20% mais larga */
         section[data-testid="stSidebar"] {
           background: #eef4ff !important;
           border-right: 1px solid #dfe8ff;
@@ -601,19 +623,9 @@ def main():
           max-width: 360px !important;
         }
         section[data-testid="stSidebar"] * { color: #112a52 !important; }
-        section[data-testid="stSidebar"] input,
-        section[data-testid="stSidebar"] textarea,
-        section[data-testid="stSidebar"] select {
-          background: #ffffff !important;
-          color: #112a52 !important;
-          border: 1px solid #b7c6e6 !important;
-          box-shadow: none !important;
-        }
-        /* Header & container */
         header[data-testid="stHeader"] { background: transparent !important; box-shadow: none !important; height: 3rem; }
         div.block-container { padding-top: 2.1rem; background: #f7faff; padding-bottom: 2rem; }
 
-        /* Card premium */
         .ac-card {
           background: #f8fbff;
           border: 1.25px solid #cad9f3;
@@ -621,13 +633,8 @@ def main():
           padding: 1.05rem 1.2rem;
           margin-bottom: 1rem;
           box-shadow: 0 8px 20px rgba(20, 45, 110, 0.06);
-          transition: box-shadow 0.15s ease, transform 0.15s ease;
         }
-        .ac-card:hover {
-          box-shadow: 0 10px 24px rgba(20, 45, 110, 0.10);
-          transform: translateY(-1px);
-        }
-        .ac-card h3 { margin-top: 0; margin-bottom: 0.25rem; font-size: 1.08rem; color: #0b1b36; }
+        .ac-card h3 { margin: 0 0 0.25rem 0; font-size: 1.08rem; color: #0b1b36; }
         .ac-muted { color: #415477; font-size: 0.92rem; }
         .ac-badge {
           background: #eaf1ff; border: 1px solid #bcd0f7; color: #0b3b8a;
@@ -637,17 +644,15 @@ def main():
           background: #e3f9e5; border: 1px solid #57b26a; color: #1b6f37;
           padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem; margin-left: 0.5rem;
         }
+        .ac-flag-na {
+          background: #fde8e7; border: 1px solid #dc5a5a; color: #9b1c1c;
+          padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem; margin-left: 0.5rem;
+        }
         .ac-link {
           text-decoration:none; padding:0.46rem 0.85rem; border-radius:10px;
           border:1px solid #96b3e9; color:#0b3b8a;
         }
-
-        /* Botão Pesquisar (fonte branca) */
-        section[data-testid="stSidebar"] #btnPesquisarWrap .stButton > button {
-          color: #ffffff !important;
-        }
-
-        /* Checkbox em negrito */
+        section[data-testid="stSidebar"] #btnPesquisarWrap .stButton > button { color: #ffffff !important; }
         div[data-testid="stCheckbox"] label { font-weight: 700; }
         </style>
         """,
@@ -664,10 +669,10 @@ def main():
         st.stop()
     ibge_df = load_ibge_catalog()
 
-    # Sidebar reativa (UF/município fora de form)
+    # Sidebar
     disparar_busca = _sidebar(pncp_df, ibge_df)
 
-    # Monta assinatura e decide origem dos dados (cache vs memória)
+    # Assinatura & coleta
     status_value = STATUS_MAP.get(st.session_state.sidebar_inputs["status_label"], "")
     palavra_chave = (st.session_state.sidebar_inputs["palavra_chave"] or "").strip()
     signature = {
@@ -684,20 +689,19 @@ def main():
             df = coletar_por_assinatura(signature)
         st.session_state.results_df = df.to_dict("records")
         st.session_state.results_signature = signature
-        st.session_state.card_page = 1  # reinicia paginação a cada nova coleta
+        st.session_state.card_page = 1
     else:
         if st.session_state.results_df is None:
             st.info("Configure os filtros e clique em **Pesquisar**.")
             st.stop()
         df = pd.DataFrame(st.session_state.results_df)
-
         if st.session_state.results_signature and signature != st.session_state.results_signature:
-            st.warning("Filtros alterados após a última coleta. Clique em **Pesquisar** para atualizar os resultados.")
+            st.warning("Filtros alterados após a última coleta. Clique em **Pesquisar** para atualizar.")
 
-    # ===== Renderização =====
+    # ===== Render =====
     st.subheader(f"Resultados ({len(df)})")
     if df.empty:
-        st.info("Nenhum resultado encontrado com os critérios atuais.")
+        st.info("Nenhum resultado encontrado.")
         return
 
     if "_pub_dt" not in df.columns:
@@ -739,22 +743,32 @@ def main():
 
     page_df = df.iloc[start:end].copy()
 
-    # ====== CARDS + checkbox alinhado ao topo direito ======
+    # ====== CARDS + 2 checkboxes topo direito ======
     for _, row in page_df.iterrows():
         uid = _uid_from_row(row)
-        current_flag = bool(st.session_state.tr_marks.get(uid, False))
+        tr_flag = bool(st.session_state.tr_marks.get(uid, False))
+        na_flag = bool(st.session_state.na_marks.get(uid, False))
 
-        # Barra superior com checkbox alinhado à direita (simula canto superior direito do card)
-        col_spacer, col_cb = st.columns([6, 1])
-        with col_cb:
-            new_val = st.checkbox("TR Elaborado", value=current_flag, key=f"tr_{uid}")
-        # Se mudou, persiste e refaz layout para refletir badge no título
-        if new_val != current_flag:
-            st.session_state.tr_marks[uid] = bool(new_val)
-            _persist_tr_marks(st.session_state.tr_marks)
+        # Cabeçalho de controles (lado direito, dois checkboxes)
+        col_spacer, col_cb_tr, col_cb_na = st.columns([6, 1.3, 1.3])
+        with col_cb_tr:
+            new_tr = st.checkbox("TR Elaborado", value=tr_flag, key=f"tr_{uid}")
+        with col_cb_na:
+            new_na = st.checkbox("Não Atende", value=na_flag, key=f"na_{uid}")
+
+        updated = False
+        if new_tr != tr_flag:
+            st.session_state.tr_marks[uid] = bool(new_tr)
+            _persist_marks(SAVED_TR_PATH, st.session_state.tr_marks)
+            updated = True
+        if new_na != na_flag:
+            st.session_state.na_marks[uid] = bool(new_na)
+            _persist_marks(SAVED_NA_PATH, st.session_state.na_marks)
+            updated = True
+        if updated:
             st.rerun()
 
-        # Agora o card
+        # Card em si
         link = row.get('Link para o edital','')
         titulo = row.get('Título') or '(Sem título)'
         cidade = row.get('Cidade','')
@@ -767,12 +781,13 @@ def main():
         orgao = row.get('Orgão','')
         proc = (row.get('numero_processo') or '').strip()
 
-        tr_badge = '<span class="ac-flag">TR Elaborado</span>' if new_val else ''
+        tr_badge = '<span class="ac-flag">TR Elaborado</span>' if new_tr else ''
+        na_badge = '<span class="ac-flag-na">Não Atende</span>' if new_na else ''
         processo_html = f'<div class="ac-muted">Processo: {proc}</div>' if proc else '<div></div>'
 
         html = f"""
         <div class="ac-card">
-            <h3>{titulo} {tr_badge}</h3>
+            <h3>{titulo} {tr_badge} {na_badge}</h3>
             <div class="ac-muted">
                 <span class="ac-badge">{cidade} / {uf}</span>
                 &nbsp;•&nbsp;
@@ -811,8 +826,8 @@ def main():
 
     st.divider()
 
-    # ===== Exportação XLSX (sem colunas técnicas) =====
-    drop_cols = [c for c in ["_pub_raw", "_fim_raw", "_pub_dt", "_valor_estimado_search", "_orgao_cnpj", "_ano", "_seq", "_id"] if c in df.columns]
+    # ===== Exportação XLSX =====
+    drop_cols = [c for c in ["_pub_raw", "_fim_raw", "_pub_dt", "_orgao_cnpj", "_ano", "_seq", "_id"] if c in df.columns]
     export_df = df.drop(columns=[c for c in drop_cols if c in df.columns]).copy()
     xlsx_buf = io.BytesIO()
     with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as wr:
