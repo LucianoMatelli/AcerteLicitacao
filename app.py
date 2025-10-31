@@ -19,7 +19,7 @@ import streamlit as st
 # Configuração de página
 # ==========================
 st.set_page_config(
-    page_title="📑 Acerte Licitações — O seu Buscador de Editais",
+    page_title="Acerte Licitações — Seu Buscador de Editais",
     page_icon="📑",
     layout="wide",
 )
@@ -403,7 +403,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
         STATUS_LABELS,
         index=STATUS_LABELS.index(st.session_state.sidebar_inputs["status_label"]) if st.session_state.sidebar_inputs["status_label"] in STATUS_LABELS else 0,
         key="status_radio",
-        help="Agrupamentos mapeados para valores aceitos pela API do PNCP.",
+        help="Selecione em qual etapa (status) quer encontrar os Editais no PNCP.",
     )
 
     if ibge_df is not None:
@@ -443,7 +443,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 
         labels = ["—"] + [row[2] for row in mun_options]
         chosen = st.sidebar.selectbox(
-            "Adicionar município (IBGE)",
+            "Selecione a cidade e clique em + Adicionar município",
             labels,
             index=0,
             key=f"municipio_select_{st.session_state.municipio_nonce}",
