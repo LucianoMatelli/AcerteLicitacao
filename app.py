@@ -592,7 +592,7 @@ def _cb_page_size_change():
 # ==========================
 def main():
     st.title("📑 Acerte Licitações — O seu Buscador de Editais")
-    st.caption("Doutor Bro, o seu irmão na licitação: Selecione os municípios e acompanhe seus Editais.")
+    st.caption("Selecione os municípios e acompanhe seus Editais publicados.")
 
     # CSS mínimo para manter visual
     st.markdown(
