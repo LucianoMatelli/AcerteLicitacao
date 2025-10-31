@@ -103,10 +103,6 @@ def _full_url(item_url: str) -> str:
     return ORIGIN.rstrip("/") + "/" + str(item_url).lstrip("/")
 
 def _build_pncp_link(item: Dict) -> str:
-    """
-    Preferência: https://pncp.gov.br/app/editais/{orgao_cnpj}/{ano}/{numero_sequencial}
-    Fallback: converte quaisquer caminhos de '/compras/' para '/app/editais/'.
-    """
     cnpj = str(item.get("orgao_cnpj", "") or "").strip()
     ano = str(item.get("ano", "") or "").strip()
     seq = str(item.get("numero_sequencial", "") or "").strip()
@@ -124,23 +120,15 @@ def _primeiro_valor(*args):
     return ""
 
 def _uid_from_row(row: Dict) -> str:
-    """
-    UID estável para memorizar marcações entre pesquisas:
-    1) orgao_cnpj-ano-numero_sequencial;
-    2) extração do link /app/editais/{cnpj}/{ano}/{seq};
-    3) hash de (titulo + municipio_codigo + _pub_raw + orgao).
-    """
     cnpj = str(row.get("_orgao_cnpj") or "").strip()
     ano = str(row.get("_ano") or "").strip()
     seq = str(row.get("_seq") or "").strip()
     if len(cnpj) == 14 and ano.isdigit() and seq:
         return f"{cnpj}-{ano}-{seq}"
-
     link = str(row.get("Link para o edital") or "")
     m = re.search(r"/app/editais/(\d{14})/(\d{4})/(\w+)", link)
     if m:
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-
     base = f"{row.get('Título','')}-{row.get('municipio_codigo','')}-{row.get('_pub_raw','')}-{row.get('Orgão','')}"
     return hashlib.md5(base.encode("utf-8")).hexdigest()
 
@@ -215,7 +203,7 @@ def load_ibge_catalog() -> Optional[pd.DataFrame]:
     return None
 
 # ==========================
-# Coleta PNCP (baseline funcional)
+# Coleta PNCP
 # ==========================
 def consultar_pncp_por_municipio(
     municipio_id: str,
@@ -269,7 +257,6 @@ def montar_registro(item: Dict, municipio_codigo: str) -> Dict:
         item.get("numeroProcessoAdministrativo"),
     )
 
-    # Guardar campos-chaves para UID estável
     orgao_cnpj = str(item.get("orgao_cnpj") or "").strip()
     ano = str(item.get("ano") or "").strip()
     seq = str(item.get("numero_sequencial") or "").strip()
@@ -370,7 +357,6 @@ def _ensure_session_state():
 # ==========================
 @st.cache_data(ttl=900, show_spinner=False)
 def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
-    """Coleção consolidada por assinatura de filtros (municípios, status, q)."""
     registros: List[Dict] = []
     codigos = signature.get("municipios", [])
     status_value = signature.get("status", "")
@@ -385,8 +371,6 @@ def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
             registros.append(montar_registro(it, codigo))
 
     df = pd.DataFrame(registros)
-
-    # Filtro client-side por palavra-chave (título/objeto)
     q = (signature.get("q") or "").strip()
     if q and not df.empty:
         mask = (
@@ -395,7 +379,6 @@ def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
         )
         df = df[mask].copy()
 
-    # Ordenação por data de publicação (desc)
     try:
         df["_pub_dt"] = pd.to_datetime(df["_pub_raw"], errors="coerce", utc=False)
     except Exception:
@@ -405,12 +388,11 @@ def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
     return df
 
 # ==========================
-# Sidebar (reativa, sem form para UF/município)
+# Sidebar
 # ==========================
 def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     st.sidebar.header("🔎 Filtros")
 
-    # Palavra-chave e Status (reativos)
     palavra = st.sidebar.text_input(
         "Palavra-chave (aplicada no título/objeto)",
         value=st.session_state.sidebar_inputs["palavra_chave"],
@@ -424,7 +406,6 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
         help="Agrupamentos mapeados para valores aceitos pela API do PNCP.",
     )
 
-    # UFs disponíveis
     if ibge_df is not None:
         ufs = sorted(ibge_df["uf"].dropna().unique().tolist())
     else:
@@ -432,7 +413,6 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 
     ufs = [UF_PLACEHOLDER] + ufs
 
-    # Estado (reativo e obrigatório)
     uf = st.sidebar.selectbox(
         "Estado (UF) — Obrigatório",
         ufs,
@@ -440,12 +420,10 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
         key="uf_select",
     )
 
-    # Detecta mudança de UF para forçar reset do select de município
     if uf != st.session_state.uf_prev:
         st.session_state.uf_prev = uf
-        st.session_state.municipio_nonce += 1  # invalida/selectbox key para reconstruir widget
+        st.session_state.municipio_nonce += 1
 
-    # Municípios (reativo; depende da UF)
     st.sidebar.markdown("**Municípios (máximo 25)**")
     if uf == UF_PLACEHOLDER:
         st.sidebar.info("Selecione um Estado (UF) para habilitar a seleção de municípios.")
@@ -483,7 +461,6 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 nome_sel, uf_sel, _ = sel_row
                 _add_municipio_by_name(nome_sel, uf_sel, pncp_df)
 
-    # Lista dos selecionados (com botão de remover “✕”)
     if st.session_state.selected_municipios:
         st.sidebar.caption("Selecionados:")
         keep_list = []
@@ -493,14 +470,13 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 st.markdown(f"- **{m['nome']}** / {m.get('uf','')} (`{m['codigo_pncp']}`)")
             with c2:
                 if st.button("✕", key=f"rm_{m['codigo_pncp']}", help=f"Remover {m['nome']}"):
-                    pass  # remove
+                    pass
                 else:
                     keep_list.append(m)
         if len(keep_list) != len(st.session_state.selected_municipios):
             st.session_state.selected_municipios = keep_list
             st.rerun()
 
-    # Salvar / Excluir lado a lado
     st.sidebar.subheader("💾 Pesquisa salva")
     save_name = st.sidebar.text_input(
         "Nome da pesquisa", value=st.session_state.sidebar_inputs["save_name"], key="save_name_input"
@@ -534,7 +510,6 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
             _persist_saved_searches(st.session_state.saved_searches)
             st.sidebar.success(f"Pesquisa '{name}' salva.")
 
-    # Lista de pesquisas salvas
     st.sidebar.subheader("📚 Pesquisas salvas")
     saved_names = sorted(list(st.session_state.saved_searches.keys()))
     selected_saved = st.sidebar.selectbox("Carregar pesquisa", ["—"] + saved_names, index=0, key="select_saved")
@@ -553,24 +528,19 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 )
                 st.session_state.sidebar_inputs["uf"] = payload.get("uf", UF_PLACEHOLDER)
                 st.session_state.uf_prev = st.session_state.sidebar_inputs["uf"]
-                st.session_state.municipio_nonce += 1  # força reconstrução do seletor de município
+                st.session_state.municipio_nonce += 1
                 st.session_state.selected_municipios = payload.get("municipios", [])
                 st.session_state.sidebar_inputs["save_name"] = sel
                 st.sidebar.success(f"Pesquisa '{sel}' carregada.")
                 st.rerun()
 
-    # Atualiza inputs persistidos (sem disparar coleta ainda)
     st.session_state.sidebar_inputs["palavra_chave"] = palavra
     st.session_state.sidebar_inputs["status_label"] = status_label
     st.session_state.sidebar_inputs["uf"] = uf
     st.session_state.sidebar_inputs["save_name"] = save_name
     st.session_state.sidebar_inputs["selected_saved"] = selected_saved
 
-    # Botão principal
-    st.sidebar.markdown('<div id="btnPesquisarWrap">', unsafe_allow_html=True)
     disparar_busca = st.sidebar.button("Pesquisar", use_container_width=True, type="primary", key="btn_pesquisar")
-    st.sidebar.markdown("</div>", unsafe_allow_html=True)
-
     if disparar_busca and uf == UF_PLACEHOLDER:
         st.sidebar.error("Selecione uma UF para habilitar a pesquisa.")
         disparar_busca = False
@@ -606,54 +576,39 @@ def _add_municipio_by_name(nome_municipio: str, uf: Optional[str], pncp_df: pd.D
     sel.append({"codigo_pncp": codigo, "nome": nome, "uf": uf_val})
 
 # ==========================
+# Callbacks de paginação (garantem execução antes do slice)
+# ==========================
+def _cb_prev(total_pages: int):
+    st.session_state.card_page = max(1, int(st.session_state.get("card_page", 1)) - 1)
+
+def _cb_next(total_pages: int):
+    st.session_state.card_page = min(total_pages, int(st.session_state.get("card_page", 1)) + 1)
+
+def _cb_page_size_change():
+    st.session_state.card_page = 1
+
+# ==========================
 # UI principal
 # ==========================
 def main():
     st.title("📑 Acerte Licitações — O seu Buscador de Editais")
     st.caption("Selecione os municípios e acompanhe seus TRs.")
 
-    # ======== CSS ========
+    # ======== CSS mínimo (mantido) ========
     st.markdown(
         """
         <style>
-        section[data-testid="stSidebar"] {
-          background: #eef4ff !important;
-          border-right: 1px solid #dfe8ff;
-          min-width: 360px !important;
-          max-width: 360px !important;
-        }
+        section[data-testid="stSidebar"] { background: #eef4ff !important; border-right: 1px solid #dfe8ff; min-width: 360px !important; max-width: 360px !important; }
         section[data-testid="stSidebar"] * { color: #112a52 !important; }
         header[data-testid="stHeader"] { background: transparent !important; box-shadow: none !important; height: 3rem; }
         div.block-container { padding-top: 2.1rem; background: #f7faff; padding-bottom: 2rem; }
-
-        .ac-card {
-          background: #f8fbff;
-          border: 1.25px solid #cad9f3;
-          border-radius: 18px;
-          padding: 1.05rem 1.2rem;
-          margin-bottom: 1rem;
-          box-shadow: 0 8px 20px rgba(20, 45, 110, 0.06);
-        }
+        .ac-card { background: #f8fbff; border: 1.25px solid #cad9f3; border-radius: 18px; padding: 1.05rem 1.2rem; margin-bottom: 1rem; box-shadow: 0 8px 20px rgba(20, 45, 110, 0.06); }
         .ac-card h3 { margin: 0 0 0.25rem 0; font-size: 1.08rem; color: #0b1b36; }
         .ac-muted { color: #415477; font-size: 0.92rem; }
-        .ac-badge {
-          background: #eaf1ff; border: 1px solid #bcd0f7; color: #0b3b8a;
-          padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem;
-        }
-        .ac-flag {
-          background: #e3f9e5; border: 1px solid #57b26a; color: #1b6f37;
-          padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem; margin-left: 0.5rem;
-        }
-        .ac-flag-na {
-          background: #fde8e7; border: 1px solid #dc5a5a; color: #9b1c1c;
-          padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem; margin-left: 0.5rem;
-        }
-        .ac-link {
-          text-decoration:none; padding:0.46rem 0.85rem; border-radius:10px;
-          border:1px solid #96b3e9; color:#0b3b8a;
-        }
-        section[data-testid="stSidebar"] #btnPesquisarWrap .stButton > button { color: #ffffff !important; }
-        div[data-testid="stCheckbox"] label { font-weight: 700; }
+        .ac-badge { background: #eaf1ff; border: 1px solid #bcd0f7; color: #0b3b8a; padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem; }
+        .ac-flag { background: #e3f9e5; border: 1px solid #57b26a; color: #1b6f37; padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem; margin-left: 0.5rem; }
+        .ac-flag-na { background: #fde8e7; border: 1px solid #dc5a5a; color: #9b1c1c; padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem; margin-left: 0.5rem; }
+        .ac-link { text-decoration:none; padding:0.46rem 0.85rem; border-radius:10px; border:1px solid #96b3e9; color:#0b3b8a; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -661,7 +616,6 @@ def main():
 
     _ensure_session_state()
 
-    # Carregar bases
     try:
         pncp_df = load_municipios_pncp()
     except Exception as e:
@@ -669,10 +623,8 @@ def main():
         st.stop()
     ibge_df = load_ibge_catalog()
 
-    # Sidebar
     disparar_busca = _sidebar(pncp_df, ibge_df)
 
-    # Assinatura & coleta
     status_value = STATUS_MAP.get(st.session_state.sidebar_inputs["status_label"], "")
     palavra_chave = (st.session_state.sidebar_inputs["palavra_chave"] or "").strip()
     signature = {
@@ -698,7 +650,6 @@ def main():
         if st.session_state.results_signature and signature != st.session_state.results_signature:
             st.warning("Filtros alterados após a última coleta. Clique em **Pesquisar** para atualizar.")
 
-    # ===== Render =====
     st.subheader(f"Resultados ({len(df)})")
     if df.empty:
         st.info("Nenhum resultado encontrado.")
@@ -712,44 +663,39 @@ def main():
         df.sort_values("_pub_dt", ascending=False, na_position="last", inplace=True)
         df.reset_index(drop=True, inplace=True)
 
-    page_size_cards = st.selectbox(
+    # ===== Paginação: callbacks + slice DEPOIS dos callbacks =====
+    st.session_state.page_size_cards = st.selectbox(
         "Itens por página",
         [10, 20, 50],
         index=[10, 20, 50].index(st.session_state.get("page_size_cards", 10)) if st.session_state.get("page_size_cards", 10) in [10, 20, 50] else 0,
         key="page_size_cards",
+        on_change=_cb_page_size_change,
     )
+
     total_items = len(df)
-    total_pages = max(1, (total_items + page_size_cards - 1) // page_size_cards)
+    total_pages = max(1, (total_items + st.session_state.page_size_cards - 1) // st.session_state.page_size_cards)
 
     col_a, col_b, col_c = st.columns([1, 2, 1])
     with col_a:
-        prev_clicked = st.button("◀ Anterior", key="prev_top", disabled=(st.session_state.get("card_page", 1) <= 1))
+        st.button("◀ Anterior", key="prev_top", disabled=(st.session_state.get("card_page", 1) <= 1),
+                  on_click=_cb_prev, kwargs={"total_pages": total_pages})
     with col_c:
-        next_clicked = st.button("Próxima ▶", key="next_top", disabled=(st.session_state.get("card_page", 1) >= total_pages))
-
-    if "card_page" not in st.session_state:
-        st.session_state.card_page = 1
-    if prev_clicked:
-        st.session_state.card_page = max(1, st.session_state.card_page - 1)
-    if next_clicked:
-        st.session_state.card_page = min(total_pages, st.session_state.card_page + 1)
-    if st.session_state.card_page > total_pages:
-        st.session_state.card_page = total_pages
-
-    start = (st.session_state.card_page - 1) * page_size_cards
-    end = start + page_size_cards
+        st.button("Próxima ▶", key="next_top", disabled=(st.session_state.get("card_page", 1) >= total_pages),
+                  on_click=_cb_next, kwargs={"total_pages": total_pages})
     with col_b:
-        st.markdown(f"**Página {st.session_state.card_page} de {total_pages}**")
+        st.markdown(f"**Página {st.session_state.get('card_page',1)} de {total_pages}**")
 
+    # Slice após possíveis mudanças via callback
+    start = (st.session_state.get("card_page", 1) - 1) * st.session_state.page_size_cards
+    end = start + st.session_state.page_size_cards
     page_df = df.iloc[start:end].copy()
 
-    # ====== CARDS + 2 checkboxes topo direito ======
+    # ====== CARDS + checkboxes ======
     for _, row in page_df.iterrows():
         uid = _uid_from_row(row)
         tr_flag = bool(st.session_state.tr_marks.get(uid, False))
         na_flag = bool(st.session_state.na_marks.get(uid, False))
 
-        # Cabeçalho de controles (lado direito, dois checkboxes)
         col_spacer, col_cb_tr, col_cb_na = st.columns([6, 1.3, 1.3])
         with col_cb_tr:
             new_tr = st.checkbox("TR Elaborado", value=tr_flag, key=f"tr_{uid}")
@@ -768,7 +714,6 @@ def main():
         if updated:
             st.rerun()
 
-        # Card em si
         link = row.get('Link para o edital','')
         titulo = row.get('Título') or '(Sem título)'
         cidade = row.get('Cidade','')
@@ -809,24 +754,19 @@ def main():
         """
         st.markdown(html, unsafe_allow_html=True)
 
-    # Paginação (rodapé)
+    # Paginação (rodapé) — mesmos callbacks
     col_a2, col_b2, col_c2 = st.columns([1, 2, 1])
     with col_a2:
-        prev_clicked2 = st.button("◀ Anterior", key="prev_bottom", disabled=(st.session_state.card_page <= 1))
+        st.button("◀ Anterior", key="prev_bottom", disabled=(st.session_state.get("card_page", 1) <= 1),
+                  on_click=_cb_prev, kwargs={"total_pages": total_pages})
     with col_c2:
-        next_clicked2 = st.button("Próxima ▶", key="next_bottom", disabled=(st.session_state.card_page >= total_pages))
-    if prev_clicked2:
-        st.session_state.card_page = max(1, st.session_state.card_page - 1)
-    if next_clicked2:
-        st.session_state.card_page = min(total_pages, st.session_state.card_page + 1)
-    if st.session_state.card_page > total_pages:
-        st.session_state.card_page = total_pages
+        st.button("Próxima ▶", key="next_bottom", disabled=(st.session_state.get("card_page", 1) >= total_pages),
+                  on_click=_cb_next, kwargs={"total_pages": total_pages})
     with col_b2:
-        st.markdown(f"**Página {st.session_state.card_page} de {total_pages}**")
+        st.markdown(f"**Página {st.session_state.get('card_page',1)} de {total_pages}**")
 
     st.divider()
 
-    # ===== Exportação XLSX =====
     drop_cols = [c for c in ["_pub_raw", "_fim_raw", "_pub_dt", "_orgao_cnpj", "_ano", "_seq", "_id"] if c in df.columns]
     export_df = df.drop(columns=[c for c in drop_cols if c in df.columns]).copy()
     xlsx_buf = io.BytesIO()
