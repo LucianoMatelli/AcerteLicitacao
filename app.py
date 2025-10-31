@@ -565,7 +565,7 @@ def _add_municipio_by_name(nome_municipio: str, uf: Optional[str], pncp_df: pd.D
     if candidates.empty:
         candidates = pncp_df[pncp_df["nome_norm"] == nome_norm]
     if candidates.empty:
-        st.error(f"Não localizei o município '{nome_municipio}' na planilha PNCP para resolver o código.")
+        st.error(f"Não localizei o município '{nome_municipio}' no cadastro do portal PNCP.")
         return
     row = candidates.iloc[0]
     codigo = row["codigo_pncp"]
