@@ -443,7 +443,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 
         labels = ["—"] + [row[2] for row in mun_options]
         chosen = st.sidebar.selectbox(
-            "Selecione a cidade e clique em + Adicionar",
+            "Selecione a(s) cidade(s) e adicione a pesquisa",
             labels,
             index=0,
             key=f"municipio_select_{st.session_state.municipio_nonce}",
