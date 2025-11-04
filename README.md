@@ -144,3 +144,7 @@ Para não perder estado quando a app hiberna, os dados são salvos no repositór
 ---
 
 ## 🧠 Desenvolvido por Luciano Matelli
+
+---
+
+
