@@ -6,10 +6,11 @@ import io
 import re
 import json
 import time
+import base64
 import unicodedata
 import hashlib
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
@@ -19,7 +20,7 @@ import streamlit as st
 # Configuração de página
 # ==========================
 st.set_page_config(
-    page_title="Acerte Licitações — Seu Buscador de Editais",
+    page_title="📑 Acerte Licitações — O seu Buscador de Editais",
     page_icon="📑",
     layout="wide",
 )
@@ -48,7 +49,7 @@ HEADERS = {
     "Referer": "https://pncp.gov.br/app/editais",
     "Accept-Language": "pt-BR,pt;q=0.9",
 }
-TAM_PAGINA_FIXO = 100
+TAM_PAGINA_FIXO = 100  # coleta sempre com 100 por página
 
 STATUS_LABELS = [
     "A Receber/Recebendo Proposta",
@@ -103,6 +104,10 @@ def _full_url(item_url: str) -> str:
     return ORIGIN.rstrip("/") + "/" + str(item_url).lstrip("/")
 
 def _build_pncp_link(item: Dict) -> str:
+    """
+    Preferência: https://pncp.gov.br/app/editais/{orgao_cnpj}/{ano}/{numero_sequencial}
+    Fallback: corrige caminhos /compras/ -> /app/editais/.
+    """
     cnpj = str(item.get("orgao_cnpj", "") or "").strip()
     ano = str(item.get("ano", "") or "").strip()
     seq = str(item.get("numero_sequencial", "") or "").strip()
@@ -133,7 +138,71 @@ def _uid_from_row(row: Dict) -> str:
     return hashlib.md5(base.encode("utf-8")).hexdigest()
 
 # ==========================
-# Loaders
+# Persistência via GitHub Contents API
+# ==========================
+def _gh_headers() -> Dict[str, str]:
+    tok = st.secrets.get("GITHUB_TOKEN")
+    return {
+        "Authorization": f"token {tok}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "AcerteLicitacoes/PNCP",
+    }
+
+def _gh_cfg_ok() -> bool:
+    return bool(st.secrets.get("GITHUB_TOKEN") and st.secrets.get("GITHUB_REPO"))
+
+def _gh_paths(filename: str) -> Tuple[str, str, str]:
+    repo   = st.secrets["GITHUB_REPO"]
+    branch = st.secrets.get("GITHUB_BRANCH", "main")
+    based  = st.secrets.get("GITHUB_BASEDIR", "data")
+    path   = f"{based.rstrip('/')}/{filename}"
+    return repo, branch, path
+
+def _gh_get_json(filename: str) -> Tuple[Optional[dict], Optional[str]]:
+    """Retorna (conteudo_json, sha) ou (None, None) se não existir."""
+    if not _gh_cfg_ok():
+        return None, None
+    repo, branch, path = _gh_paths(filename)
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    r = requests.get(url, params={"ref": branch}, headers=_gh_headers(), timeout=30)
+    if r.status_code == 404:
+        return None, None
+    r.raise_for_status()
+    js = r.json()
+    content_b64 = js.get("content", "")
+    sha = js.get("sha")
+    try:
+        raw = base64.b64decode(content_b64).decode("utf-8")
+        return json.loads(raw), sha
+    except Exception:
+        return None, sha
+
+def _gh_put_json(filename: str, payload: dict, sha: Optional[str]) -> None:
+    """Cria/atualiza arquivo com commit. Se sha for None, cria; senão atualiza."""
+    if not _gh_cfg_ok():
+        return
+    repo, branch, path = _gh_paths(filename)
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    content_b64 = base64.b64encode(
+        json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    ).decode("utf-8")
+    data = {
+        "message": f"chore: atualizar {path} via app",
+        "content": content_b64,
+        "branch": branch,
+        "committer": {
+            "name": st.secrets.get("GITHUB_COMMITTER_NAME", "PNCP Bot"),
+            "email": st.secrets.get("GITHUB_COMMITTER_EMAIL", "bot@acertelicitacoes.local"),
+        },
+    }
+    if sha:
+        data["sha"] = sha
+    r = requests.put(url, headers=_gh_headers(), json=data, timeout=30)
+    r.raise_for_status()
+
+# ==========================
+# Loaders locais + GitHub (híbridos)
 # ==========================
 @st.cache_data(show_spinner=False)
 def load_municipios_pncp() -> pd.DataFrame:
@@ -202,8 +271,55 @@ def load_ibge_catalog() -> Optional[pd.DataFrame]:
                         continue
     return None
 
+def _load_saved_searches() -> Dict[str, Dict]:
+    js, _ = _gh_get_json("saved_searches.json")
+    if isinstance(js, dict):
+        return js
+    try:
+        with open(SAVED_SEARCHES_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _persist_saved_searches(d: Dict[str, Dict]):
+    try:
+        _, sha = _gh_get_json("saved_searches.json")
+        _gh_put_json("saved_searches.json", d, sha)
+        return
+    except Exception as e:
+        st.warning(f"Não consegui salvar no GitHub (usando fallback local): {e}")
+    try:
+        with open(SAVED_SEARCHES_PATH, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.error(f"Falha ao salvar pesquisas localmente: {e}")
+
+def _load_marks(path: str, remote_name: str) -> Dict[str, bool]:
+    js, _ = _gh_get_json(remote_name) if _gh_cfg_ok() else (None, None)
+    if isinstance(js, dict):
+        return {str(k): bool(v) for k, v in js.items()}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return {str(k): bool(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def _persist_marks(path: str, remote_name: str, d: Dict[str, bool]):
+    try:
+        _, sha = _gh_get_json(remote_name)
+        _gh_put_json(remote_name, d, sha)
+        return
+    except Exception as e:
+        st.warning(f"Não consegui salvar no GitHub (usando fallback local): {e}")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.error(f"Falha ao salvar marcações localmente: {e}")
+
 # ==========================
-# Coleta PNCP
+# Coleta PNCP (baseline funcional)
 # ==========================
 def consultar_pncp_por_municipio(
     municipio_id: str,
@@ -286,51 +402,17 @@ def montar_registro(item: Dict, municipio_codigo: str) -> Dict:
     }
 
 # ==========================
-# Persistência e estado
+# Estado
 # ==========================
-def _load_saved_searches() -> Dict[str, Dict]:
-    if os.path.exists(SAVED_SEARCHES_PATH):
-        try:
-            with open(SAVED_SEARCHES_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-def _persist_saved_searches(d: Dict[str, Dict]):
-    try:
-        with open(SAVED_SEARCHES_PATH, "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        st.error(f"Falha ao salvar pesquisas: {e}")
-
-def _load_marks(path: str) -> Dict[str, bool]:
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    return {str(k): bool(v) for k, v in data.items()}
-        except Exception:
-            pass
-    return {}
-
-def _persist_marks(path: str, d: Dict[str, bool]):
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        st.error(f"Falha ao salvar marcações em {os.path.basename(path)}: {e}")
-
 def _ensure_session_state():
     if "selected_municipios" not in st.session_state:
-        st.session_state.selected_municipios = []
+        st.session_state.selected_municipios = []  # list[{codigo_pncp,nome,uf}]
     if "saved_searches" not in st.session_state:
         st.session_state.saved_searches = _load_saved_searches()
     if "sidebar_inputs" not in st.session_state:
         st.session_state.sidebar_inputs = {
             "palavra_chave": "",
-            "status_label": STATUS_LABELS[0],
+            "status_label": STATUS_LABELS[0],  # default
             "uf": UF_PLACEHOLDER,
             "save_name": "",
             "selected_saved": None,
@@ -344,19 +426,20 @@ def _ensure_session_state():
     if "page_size_cards" not in st.session_state:
         st.session_state.page_size_cards = 10
     if "results_df" not in st.session_state:
-        st.session_state.results_df = None
+        st.session_state.results_df = None  # list[dict]
     if "results_signature" not in st.session_state:
         st.session_state.results_signature = None
     if "tr_marks" not in st.session_state:
-        st.session_state.tr_marks = _load_marks(SAVED_TR_PATH)
+        st.session_state.tr_marks = _load_marks(SAVED_TR_PATH, "tr_marks.json")
     if "na_marks" not in st.session_state:
-        st.session_state.na_marks = _load_marks(SAVED_NA_PATH)
+        st.session_state.na_marks = _load_marks(SAVED_NA_PATH, "na_marks.json")
 
 # ==========================
 # Coleta agregada (CACHE)
 # ==========================
 @st.cache_data(ttl=900, show_spinner=False)
 def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
+    """Coleção consolidada por assinatura de filtros (municípios, status, q)."""
     registros: List[Dict] = []
     codigos = signature.get("municipios", [])
     status_value = signature.get("status", "")
@@ -371,6 +454,8 @@ def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
             registros.append(montar_registro(it, codigo))
 
     df = pd.DataFrame(registros)
+
+    # Filtro client-side por palavra-chave (título/objeto)
     q = (signature.get("q") or "").strip()
     if q and not df.empty:
         mask = (
@@ -379,6 +464,7 @@ def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
         )
         df = df[mask].copy()
 
+    # Ordenação por data de publicação (desc)
     try:
         df["_pub_dt"] = pd.to_datetime(df["_pub_raw"], errors="coerce", utc=False)
     except Exception:
@@ -388,13 +474,14 @@ def coletar_por_assinatura(signature: dict) -> pd.DataFrame:
     return df
 
 # ==========================
-# Sidebar
+# Sidebar (reativa)
 # ==========================
 def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     st.sidebar.header("🔎 Filtros")
 
+    # Palavra-chave e Status (reativos)
     palavra = st.sidebar.text_input(
-        "Palavra-chave (aplicada no título/objeto)",
+        "Palavra-chave (aplicada no título/objeto após coleta)",
         value=st.session_state.sidebar_inputs["palavra_chave"],
         key="palavra_chave_input",
     )
@@ -403,9 +490,10 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
         STATUS_LABELS,
         index=STATUS_LABELS.index(st.session_state.sidebar_inputs["status_label"]) if st.session_state.sidebar_inputs["status_label"] in STATUS_LABELS else 0,
         key="status_radio",
-        help="Selecione em qual etapa (status) quer encontrar os Editais no PNCP.",
+        help="Agrupamentos mapeados para valores aceitos pela API do PNCP.",
     )
 
+    # UFs disponíveis
     if ibge_df is not None:
         ufs = sorted(ibge_df["uf"].dropna().unique().tolist())
     else:
@@ -413,18 +501,21 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 
     ufs = [UF_PLACEHOLDER] + ufs
 
+    # Estado (reativo e obrigatório)
     uf = st.sidebar.selectbox(
-        "Estado (UF) — Obrigatório",
+        "Estado (UF) — obrigatório",
         ufs,
         index=ufs.index(st.session_state.sidebar_inputs["uf"]) if st.session_state.sidebar_inputs["uf"] in ufs else 0,
         key="uf_select",
     )
 
+    # Detecta mudança de UF para forçar reset do select de município
     if uf != st.session_state.uf_prev:
         st.session_state.uf_prev = uf
-        st.session_state.municipio_nonce += 1
+        st.session_state.municipio_nonce += 1  # invalida/selectbox key para reconstruir widget
 
-    st.sidebar.markdown("**Municípios (máximo 25)**")
+    # Municípios (reativo; depende da UF)
+    st.sidebar.markdown("**Municípios (máx. 25)**")
     if uf == UF_PLACEHOLDER:
         st.sidebar.info("Selecione um Estado (UF) para habilitar a seleção de municípios.")
         chosen = None
@@ -443,7 +534,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 
         labels = ["—"] + [row[2] for row in mun_options]
         chosen = st.sidebar.selectbox(
-            "Selecione a(s) cidade(s) e adicione a pesquisa",
+            "Adicionar município (IBGE)",
             labels,
             index=0,
             key=f"municipio_select_{st.session_state.municipio_nonce}",
@@ -461,8 +552,9 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 nome_sel, uf_sel, _ = sel_row
                 _add_municipio_by_name(nome_sel, uf_sel, pncp_df)
 
+    # Lista dos selecionados (com botão de remover “✕”)
     if st.session_state.selected_municipios:
-        st.sidebar.caption("Municípios Selecionados:")
+        st.sidebar.caption("Selecionados:")
         keep_list = []
         for m in st.session_state.selected_municipios:
             c1, c2 = st.sidebar.columns([0.82, 0.18])
@@ -470,13 +562,14 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 st.markdown(f"- **{m['nome']}** / {m.get('uf','')} (`{m['codigo_pncp']}`)")
             with c2:
                 if st.button("✕", key=f"rm_{m['codigo_pncp']}", help=f"Remover {m['nome']}"):
-                    pass
+                    pass  # removido
                 else:
                     keep_list.append(m)
         if len(keep_list) != len(st.session_state.selected_municipios):
             st.session_state.selected_municipios = keep_list
             st.rerun()
 
+    # Salvar / Excluir lado a lado
     st.sidebar.subheader("💾 Pesquisa salva")
     save_name = st.sidebar.text_input(
         "Nome da pesquisa", value=st.session_state.sidebar_inputs["save_name"], key="save_name_input"
@@ -510,6 +603,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
             _persist_saved_searches(st.session_state.saved_searches)
             st.sidebar.success(f"Pesquisa '{name}' salva.")
 
+    # Lista de pesquisas salvas
     st.sidebar.subheader("📚 Pesquisas salvas")
     saved_names = sorted(list(st.session_state.saved_searches.keys()))
     selected_saved = st.sidebar.selectbox("Carregar pesquisa", ["—"] + saved_names, index=0, key="select_saved")
@@ -528,19 +622,21 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
                 )
                 st.session_state.sidebar_inputs["uf"] = payload.get("uf", UF_PLACEHOLDER)
                 st.session_state.uf_prev = st.session_state.sidebar_inputs["uf"]
-                st.session_state.municipio_nonce += 1
+                st.session_state.municipio_nonce += 1  # força reconstrução do seletor de município
                 st.session_state.selected_municipios = payload.get("municipios", [])
                 st.session_state.sidebar_inputs["save_name"] = sel
                 st.sidebar.success(f"Pesquisa '{sel}' carregada.")
                 st.rerun()
 
+    # Atualiza inputs persistidos (sem disparar coleta ainda)
     st.session_state.sidebar_inputs["palavra_chave"] = palavra
     st.session_state.sidebar_inputs["status_label"] = status_label
     st.session_state.sidebar_inputs["uf"] = uf
     st.session_state.sidebar_inputs["save_name"] = save_name
     st.session_state.sidebar_inputs["selected_saved"] = selected_saved
 
-    disparar_busca = st.sidebar.button("🔎 Pesquisar", use_container_width=True, type="primary", key="btn_pesquisar")
+    # Botão principal — ao final e com validação de UF obrigatória
+    disparar_busca = st.sidebar.button("Pesquisar", use_container_width=True, type="primary", key="btn_pesquisar")
     if disparar_busca and uf == UF_PLACEHOLDER:
         st.sidebar.error("Selecione uma UF para habilitar a pesquisa.")
         disparar_busca = False
@@ -565,7 +661,7 @@ def _add_municipio_by_name(nome_municipio: str, uf: Optional[str], pncp_df: pd.D
     if candidates.empty:
         candidates = pncp_df[pncp_df["nome_norm"] == nome_norm]
     if candidates.empty:
-        st.error(f"Não localizei o município '{nome_municipio}' no cadastro do portal PNCP.")
+        st.error(f"Não localizei o município '{nome_municipio}' na planilha PNCP para resolver o código.")
         return
     row = candidates.iloc[0]
     codigo = row["codigo_pncp"]
@@ -592,30 +688,77 @@ def _cb_page_size_change():
 # ==========================
 def main():
     st.title("📑 Acerte Licitações — O seu Buscador de Editais")
-    st.caption("Selecione os municípios e acompanhe seus Editais publicados no Portal Nacional de Contratações Públicas - PNCP.")
+    st.caption("Seleção IBGE→PNCP (máx. 25 municípios) • Persistência no GitHub • Cards com TR/Não Atende • Paginação robusta")
 
-    # CSS mínimo para manter visual
-    st.markdown(
-        """
+    # ======== CSS Premium ========
+    st.markdown('''
         <style>
-        section[data-testid="stSidebar"] { background: #eef4ff !important; border-right: 1px solid #dfe8ff; min-width: 360px !important; max-width: 360px !important; }
+        section[data-testid="stSidebar"] {
+          background: #eef4ff !important;
+          border-right: 1px solid #dfe8ff;
+          min-width: 360px !important;
+          max-width: 360px !important;
+        }
         section[data-testid="stSidebar"] * { color: #112a52 !important; }
+        section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+          color: #ffffff !important;
+          background: #1f4ba8 !important;
+          border: 1px solid #173a83 !important;
+        }
+        section[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
+          background: #173a83 !important;
+          border-color: #122e67 !important;
+        }
         header[data-testid="stHeader"] { background: transparent !important; box-shadow: none !important; height: 3rem; }
         div.block-container { padding-top: 2.1rem; background: #f7faff; padding-bottom: 2rem; }
-        .ac-card { background: #f8fbff; border: 1.25px solid #cad9f3; border-radius: 18px; padding: 1.05rem 1.2rem; margin-bottom: 1rem; box-shadow: 0 8px 20px rgba(20, 45, 110, 0.06); }
-        .ac-card h3 { margin: 0 0 0.25rem 0; font-size: 1.08rem; color: #0b1b36; }
+        .stDownloadButton > button {
+          color: #ffffff !important;
+          background: #1f4ba8 !important;
+          border: 1px solid #173a83 !important;
+          font-size: 0.7rem !important;
+          padding: 0.28rem 0.6rem !important;
+        }
+        .stDownloadButton > button:hover {
+          background: #173a83 !important;
+          border-color: #122e67 !important;
+        }
+        .ac-card {
+          background: #f8fbff;
+          border: 1.25px solid #cad9f3;
+          border-radius: 18px;
+          padding: 1.05rem 1.2rem;
+          margin-bottom: 1rem;
+          box-shadow: 0 8px 20px rgba(20, 45, 110, 0.06);
+          transition: box-shadow 0.15s ease, transform 0.15s ease;
+        }
+        .ac-card:hover {
+          box-shadow: 0 10px 24px rgba(20, 45, 110, 0.10);
+          transform: translateY(-1px);
+        }
+        .ac-card h3 { margin-top: 0; margin-bottom: 0.25rem; font-size: 1.08rem; color: #0b1b36; }
         .ac-muted { color: #415477; font-size: 0.92rem; }
-        .ac-badge { background: #eaf1ff; border: 1px solid #bcd0f7; color: #0b3b8a; padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem; }
-        .ac-flag { background: #e3f9e5; border: 1px solid #57b26a; color: #1b6f37; padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem; margin-left: 0.5rem; }
-        .ac-flag-na { background: #fde8e7; border: 1px solid #dc5a5a; color: #9b1c1c; padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem; margin-left: 0.5rem; }
-        .ac-link { text-decoration:none; padding:0.46rem 0.85rem; border-radius:10px; border:1px solid #96b3e9; color:#0b3b8a; }
+        .ac-badge {
+          background: #eaf1ff; border: 1px solid #bcd0f7; color: #0b3b8a;
+          padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem;
+        }
+        .ac-flag {
+          background: #e3f9e5; border: 1px solid #57b26a; color: #1b6f37;
+          padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem; margin-left: 0.5rem;
+        }
+        .ac-flag-na {
+          background: #fde8e7; border: 1px solid #dc5a5a; color: #9b1c1c;
+          padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem; margin-left: 0.5rem;
+        }
+        .ac-link {
+          text-decoration:none; padding:0.46rem 0.85rem; border-radius:10px;
+          border:1px solid #96b3e9; color:#0b3b8a;
+        }
         </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    ''', unsafe_allow_html=True)
 
     _ensure_session_state()
 
+    # Carregar bases
     try:
         pncp_df = load_municipios_pncp()
     except Exception as e:
@@ -623,8 +766,10 @@ def main():
         st.stop()
     ibge_df = load_ibge_catalog()
 
+    # Sidebar reativa
     disparar_busca = _sidebar(pncp_df, ibge_df)
 
+    # Monta assinatura e decide origem dos dados (cache vs memória)
     status_value = STATUS_MAP.get(st.session_state.sidebar_inputs["status_label"], "")
     palavra_chave = (st.session_state.sidebar_inputs["palavra_chave"] or "").strip()
     signature = {
@@ -641,18 +786,20 @@ def main():
             df = coletar_por_assinatura(signature)
         st.session_state.results_df = df.to_dict("records")
         st.session_state.results_signature = signature
-        st.session_state.card_page = 1
+        st.session_state.card_page = 1  # reinicia paginação a cada nova coleta
     else:
         if st.session_state.results_df is None:
             st.info("Configure os filtros e clique em **Pesquisar**.")
             st.stop()
         df = pd.DataFrame(st.session_state.results_df)
-        if st.session_state.results_signature and signature != st.session_state.results_signature:
-            st.warning("Filtros alterados após a última coleta. Clique em **Pesquisar** para atualizar.")
 
+        if st.session_state.results_signature and signature != st.session_state.results_signature:
+            st.warning("Filtros alterados após a última coleta. Clique em **Pesquisar** para atualizar os resultados.")
+
+    # ===== Renderização =====
     st.subheader(f"Resultados ({len(df)})")
     if df.empty:
-        st.info("Nenhum resultado encontrado.")
+        st.info("Nenhum resultado encontrado com os critérios atuais.")
         return
 
     if "_pub_dt" not in df.columns:
@@ -663,7 +810,6 @@ def main():
         df.sort_values("_pub_dt", ascending=False, na_position="last", inplace=True)
         df.reset_index(drop=True, inplace=True)
 
-    # ===== Paginação
     _ = st.selectbox(
         "Itens por página",
         [10, 20, 50],
@@ -696,6 +842,7 @@ def main():
         tr_flag = bool(st.session_state.tr_marks.get(uid, False))
         na_flag = bool(st.session_state.na_marks.get(uid, False))
 
+        # checkboxes lado a lado, acima do card (à direita)
         col_spacer, col_cb_tr, col_cb_na = st.columns([6, 1.3, 1.3])
         with col_cb_tr:
             new_tr = st.checkbox("TR Elaborado", value=tr_flag, key=f"tr_{uid}")
@@ -705,11 +852,11 @@ def main():
         updated = False
         if new_tr != tr_flag:
             st.session_state.tr_marks[uid] = bool(new_tr)
-            _persist_marks(SAVED_TR_PATH, st.session_state.tr_marks)
+            _persist_marks(SAVED_TR_PATH, "tr_marks.json", st.session_state.tr_marks)
             updated = True
         if new_na != na_flag:
             st.session_state.na_marks[uid] = bool(new_na)
-            _persist_marks(SAVED_NA_PATH, st.session_state.na_marks)
+            _persist_marks(SAVED_NA_PATH, "na_marks.json", st.session_state.na_marks)
             updated = True
         if updated:
             st.rerun()
@@ -730,7 +877,7 @@ def main():
         na_badge = '<span class="ac-flag-na">Não Atende</span>' if new_na else ''
         processo_html = f'<div class="ac-muted">Processo: {proc}</div>' if proc else '<div></div>'
 
-        html = f"""
+        html = f'''
         <div class="ac-card">
             <h3>{titulo} {tr_badge} {na_badge}</h3>
             <div class="ac-muted">
@@ -751,7 +898,7 @@ def main():
                 {f'<a class="ac-link" href="{link}" target="_blank">Abrir edital</a>' if isinstance(link, str) and link else ''}
             </div>
         </div>
-        """
+        '''
         st.markdown(html, unsafe_allow_html=True)
 
     # Paginação (rodapé)
@@ -767,6 +914,7 @@ def main():
 
     st.divider()
 
+    # ===== Exportação XLSX (sem colunas técnicas) =====
     drop_cols = [c for c in ["_pub_raw", "_fim_raw", "_pub_dt", "_orgao_cnpj", "_ano", "_seq", "_id"] if c in df.columns]
     export_df = df.drop(columns=[c for c in drop_cols if c in df.columns]).copy()
     xlsx_buf = io.BytesIO()
