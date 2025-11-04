@@ -481,7 +481,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 
     # Palavra-chave e Status (reativos)
     palavra = st.sidebar.text_input(
-        "Palavra-chave (aplicada no título/objeto)",
+        "Palavra-chave (aplicada no título/objeto):",
         value=st.session_state.sidebar_inputs["palavra_chave"],
         key="palavra_chave_input",
     )
@@ -503,7 +503,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 
     # Estado (reativo e obrigatório)
     uf = st.sidebar.selectbox(
-        "Estado (UF) — obrigatório",
+        "Estado (UF) — Obrigatório:",
         ufs,
         index=ufs.index(st.session_state.sidebar_inputs["uf"]) if st.session_state.sidebar_inputs["uf"] in ufs else 0,
         key="uf_select",
@@ -534,7 +534,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 
         labels = ["—"] + [row[2] for row in mun_options]
         chosen = st.sidebar.selectbox(
-            "Adicionar município (IBGE)",
+            "Adicionar município:",
             labels,
             index=0,
             key=f"municipio_select_{st.session_state.municipio_nonce}",
