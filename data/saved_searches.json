@@ -1,0 +1,19 @@
+{
+  "teste": {
+    "palavra_chave": "",
+    "status_label": "A Receber/Recebendo Proposta",
+    "uf": "SP",
+    "municipios": [
+      {
+        "codigo_pncp": "3523",
+        "nome": "Itapetininga",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3359",
+        "nome": "Buri",
+        "uf": ""
+      }
+    ]
+  }
+}
