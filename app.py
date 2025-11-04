@@ -636,7 +636,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
     st.session_state.sidebar_inputs["selected_saved"] = selected_saved
 
     # Botão principal — ao final e com validação de UF obrigatória
-    disparar_busca = st.sidebar.button("Pesquisar", use_container_width=True, type="primary", key="btn_pesquisar")
+    disparar_busca = st.sidebar.button("🔎 Pesquisar", use_container_width=True, type="primary", key="btn_pesquisar")
     if disparar_busca and uf == UF_PLACEHOLDER:
         st.sidebar.error("Selecione uma UF para habilitar a pesquisa.")
         disparar_busca = False
@@ -688,7 +688,7 @@ def _cb_page_size_change():
 # ==========================
 def main():
     st.title("📑 Acerte Licitações — O seu Buscador de Editais")
-    st.caption("Seleção IBGE→PNCP (máx. 25 municípios) • Persistência no GitHub • Cards com TR/Não Atende • Paginação robusta")
+    st.caption("Selecione os filtros desejados como plavra-chave no título/objeto, selecione o Estado (UF) e até 25 municípios.")
 
     # ======== CSS Premium ========
     st.markdown('''
