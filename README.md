@@ -141,4 +141,4 @@ Para não perder estado quando a app hiberna, os dados são salvos no repositór
 
 ## © Acerte Licitações — Uso interno. Não distribuir sem alinhamento prévio.
 
-## Desenvolvido por Luciano Matelli
+## 🧠 Desenvolvido por Luciano Matelli
