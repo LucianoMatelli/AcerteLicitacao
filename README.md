@@ -2,7 +2,7 @@
 
 Aplicação **Streamlit** para monitoramento de editais públicos diretamente do **PNCP**, com filtros avançados, cards elegantes, controle de histórico e **persistência de estado via GitHub**.
 
-© Acerte Licitações — Uso interno. Não distribuir sem alinhamento prévio.
+# © Acerte Licitações — Uso interno. Não distribuir sem alinhamento prévio.
 
 ---
 
@@ -98,45 +98,45 @@ GET https://pncp.gov.br/api/search
 ## 🔐 Persistência (GitHub Contents API)
 
 Para não perder estado quando a app hiberna, os dados são salvos no repositório:
-Arquivos em data/:
-saved_searches.json — pesquisas/filtros salvos.
-tr_marks.json — marcações de TR Elaborado.
-na_marks.json — marcações de Não Atende.
+- Arquivos em data/:
+- saved_searches.json — pesquisas/filtros salvos.
+- tr_marks.json — marcações de TR Elaborado.
+- na_marks.json — marcações de Não Atende.
 
 ## Como funciona:
-Leitura: GET na API do GitHub, decodifica Base64 e carrega JSON.
-Escrita: PUT com commit automático (chore: atualizar ... via app).
-Secrets necessários (st.secrets):
-GITHUB_TOKEN = "ghp_xxxxxxxxxxxxxxxxx"
-GITHUB_REPO = "UsuarioOuOrg/NomeDoRepo"
-GITHUB_BRANCH = "main"
-GITHUB_BASEDIR = "data"
-GITHUB_COMMITTER_NAME = "PNCP Bot"
-GITHUB_COMMITTER_EMAIL = "bot@acertelicitacoes.local"
-O token precisa do escopo repo (write).
-Se main tiver proteção que bloqueia commits diretos, use outro branch em GITHUB_BRANCH.
-Fallback: se o PUT falhar (rate limit/permissão), a app salva localmente e emite warning.
+- Leitura: GET na API do GitHub, decodifica Base64 e carrega JSON.
+- Escrita: PUT com commit automático (chore: atualizar ... via app).
+- Secrets necessários (st.secrets):
+- GITHUB_TOKEN = "ghp_xxxxxxxxxxxxxxxxx"
+- GITHUB_REPO = "UsuarioOuOrg/NomeDoRepo"
+- GITHUB_BRANCH = "main"
+- GITHUB_BASEDIR = "data"
+- GITHUB_COMMITTER_NAME = "PNCP Bot"
+- GITHUB_COMMITTER_EMAIL = "bot@acertelicitacoes.local"
+
+- O token precisa do escopo repo (write). Se main tiver proteção que bloqueia commits diretos, use outro branch em GITHUB_BRANCH.
+- Fallback: se o PUT falhar (rate limit/permissão), a app salva localmente e emite warning.
 
 ## ▶️ Como usar
 
-Selecione UF.
-Escolha município e clique “➕ Adicionar município” (até 25).
-Defina Status e Palavra-chave.
-Clique Pesquisar.
-Nos cards, marque TR Elaborado / Não Atende conforme a triagem.
-Salve a pesquisa para reuso.
-Baixe o XLSX se precisar trabalhar offline.
+- Selecione UF.
+- Escolha município e clique “➕ Adicionar município” (até 25).
+- Defina Status e Palavra-chave.
+- Clique Pesquisar.
+- Nos cards, marque TR Elaborado / Não Atende conforme a triagem.
+- Salve a pesquisa para reuso.
+- Baixe o XLSX se precisar trabalhar offline.
 
 ## 🧱 Arquitetura
 
-app.py — UI (Streamlit), integração PNCP, SessionState, persistência GitHub.
-ListaMunicipiosPNCP.csv — mapeia Municipio → id (código PNCP).
-IBGE_Municipios.csv — catálogo UF + municipio.
+- app.py — UI (Streamlit), integração PNCP, SessionState, persistência GitHub.
+- ListaMunicipiosPNCP.csv — mapeia Municipio → id (código PNCP).
+- IBGE_Municipios.csv — catálogo UF + municipio.
 
 ## 📞 Suporte
 
-Ajustes de cores/layout: editar bloco <style> no app.py.
-Trocar branch/pasta de persistência: atualizar st.secrets.
-Atualizar catálogos: subir novos IBGE_Municipios.csv e ListaMunicipiosPNCP.csv.
+- Ajustes de cores/layout: editar bloco <style> no app.py.
+- Trocar branch/pasta de persistência: atualizar st.secrets.
+- Atualizar catálogos: subir novos IBGE_Municipios.csv e ListaMunicipiosPNCP.csv.
 
-© Acerte Licitações — Uso interno. Não distribuir sem alinhamento prévio.
+## © Acerte Licitações — Uso interno. Não distribuir sem alinhamento prévio.
