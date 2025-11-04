@@ -1,10 +1,10 @@
 # © Acerte Licitações — Uso interno. Não distribuir sem alinhamento prévio.
 
-
+---
 
 # 📑 Acerte Licitações — Buscador PNCP com Persistência
 
-
+---
 
 Aplicação **Streamlit** para monitoramento de editais públicos diretamente do **PNCP**, com filtros avançados, cards elegantes, controle de histórico e **persistência de estado via GitHub**.
 
