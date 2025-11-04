@@ -481,7 +481,7 @@ def _sidebar(pncp_df: pd.DataFrame, ibge_df: Optional[pd.DataFrame]):
 
     # Palavra-chave e Status (reativos)
     palavra = st.sidebar.text_input(
-        "Palavra-chave (aplicada no título/objeto após coleta)",
+        "Palavra-chave (aplicada no título/objeto)",
         value=st.session_state.sidebar_inputs["palavra_chave"],
         key="palavra_chave_input",
     )
