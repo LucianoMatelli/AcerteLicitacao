@@ -140,3 +140,5 @@ Para não perder estado quando a app hiberna, os dados são salvos no repositór
 - Atualizar catálogos: subir novos IBGE_Municipios.csv e ListaMunicipiosPNCP.csv.
 
 ## © Acerte Licitações — Uso interno. Não distribuir sem alinhamento prévio.
+
+## Desenvolvido por Luciano Matelli
