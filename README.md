@@ -109,8 +109,6 @@ Para não perder estado quando a app hiberna, os dados são salvos no repositór
 - GITHUB_REPO = "UsuarioOuOrg/NomeDoRepo"
 - GITHUB_BRANCH = "main"
 - GITHUB_BASEDIR = "data"
-- GITHUB_COMMITTER_NAME = "PNCP Bot"
-- GITHUB_COMMITTER_EMAIL = "bot@acertelicitacoes.local"
 
 - O token precisa do escopo repo (write). Se main tiver proteção que bloqueia commits diretos, use outro branch em GITHUB_BRANCH.
 - Fallback: se o PUT falhar (rate limit/permissão), a app salva localmente e emite warning.
