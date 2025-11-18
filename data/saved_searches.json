@@ -182,5 +182,52 @@
         "uf": ""
       }
     ]
+  },
+  "Vinicius Ito": {
+    "palavra_chave": "Horti",
+    "status_label": "A Receber/Recebendo Proposta",
+    "uf": "SP",
+    "municipios": [
+      {
+        "codigo_pncp": "3405",
+        "nome": "Conchas",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3523",
+        "nome": "Itapetininga",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3385",
+        "nome": "Capão Bonito",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3398",
+        "nome": "Cerquilho",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3477",
+        "nome": "Guareí",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3735",
+        "nome": "Quadra",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3566",
+        "nome": "Laranjal Paulista",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3871",
+        "nome": "Tatuí",
+        "uf": ""
+      }
+    ]
   }
 }
