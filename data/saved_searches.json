@@ -229,5 +229,137 @@
         "uf": ""
       }
     ]
+  },
+  "Papelaria": {
+    "palavra_chave": "Escritório",
+    "status_label": "A Receber/Recebendo Proposta",
+    "uf": "SP",
+    "municipios": [
+      {
+        "codigo_pncp": "3523",
+        "nome": "Itapetininga",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3292",
+        "nome": "Angatuba",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3345",
+        "nome": "Bofete",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3359",
+        "nome": "Buri",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3346",
+        "nome": "Boituva",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3385",
+        "nome": "Capão Bonito",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3398",
+        "nome": "Cerquilho",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3399",
+        "nome": "Cesário Lange",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3405",
+        "nome": "Conchas",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3375",
+        "nome": "Campina do Monte Alegre",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3477",
+        "nome": "Guareí",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3524",
+        "nome": "Itapeva",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3566",
+        "nome": "Laranjal Paulista",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3690",
+        "nome": "Pereiras",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3693",
+        "nome": "Piedade",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3694",
+        "nome": "Pilar do Sul",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3721",
+        "nome": "Porto Feliz",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3720",
+        "nome": "Porangaba",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3670",
+        "nome": "Paranapanema",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3735",
+        "nome": "Quadra",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3829",
+        "nome": "São Miguel Arcanjo",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3838",
+        "nome": "Sarapuí",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3775",
+        "nome": "Salto",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3878",
+        "nome": "Torre de Pedra",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3871",
+        "nome": "Tatuí",
+        "uf": ""
+      }
+    ]
   }
 }
