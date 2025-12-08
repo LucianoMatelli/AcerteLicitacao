@@ -135,6 +135,7 @@ Para não perder estado quando a app hiberna, os dados são salvos no repositór
 
 ## 📞 Suporte
 
+- Definir no streamlit para versão Python 3.11 manualmente.
 - Ajustes de cores/layout: editar bloco <style> no app.py.
 - Trocar branch/pasta de persistência: atualizar st.secrets.
 - Atualizar catálogos: subir novos IBGE_Municipios.csv e ListaMunicipiosPNCP.csv.
