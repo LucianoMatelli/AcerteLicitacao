@@ -378,5 +378,52 @@
         "uf": ""
       }
     ]
+  },
+  "Docelandia (antiga)": {
+    "palavra_chave": "",
+    "status_label": "A Receber/Recebendo Proposta",
+    "uf": "SP",
+    "municipios": [
+      {
+        "codigo_pncp": "3876",
+        "nome": "Tietê",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3398",
+        "nome": "Cerquilho",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3871",
+        "nome": "Tatuí",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3346",
+        "nome": "Boituva",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3670",
+        "nome": "Paranapanema",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3524",
+        "nome": "Itapeva",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3300",
+        "nome": "Araçoiaba da Serra",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3508",
+        "nome": "Iperó",
+        "uf": ""
+      }
+    ]
   }
 }
