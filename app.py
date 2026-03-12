@@ -688,7 +688,7 @@ def _cb_page_size_change():
 # ==========================
 def main():
     st.title("📑 Acerte Licitações — O seu Buscador de Editais")
-    st.caption("Selecione os filtros desejados como plavra-chave no título/objeto, selecione o Estado (UF) e até 25 municípios. Os editais serão exibidos abaixo, em ordem de publicação.")
+    st.caption("Selecione os filtros desejados como palavra-chave no título/objeto, selecione o Estado (UF) e até 25 municípios. Os editais serão exibidos abaixo, em ordem de publicação.")
 
     # ======== CSS Premium ========
     st.markdown('''
