@@ -270,23 +270,6 @@
       }
     ]
   },
-  "Artefato Concreto Lucas": {
-    "palavra_chave": "",
-    "status_label": "A Receber/Recebendo Proposta",
-    "uf": "SP",
-    "municipios": [
-      {
-        "codigo_pncp": "3694",
-        "nome": "Pilar do Sul",
-        "uf": ""
-      },
-      {
-        "codigo_pncp": "3838",
-        "nome": "Sarapuí",
-        "uf": ""
-      }
-    ]
-  },
   "Docelandia (antiga)": {
     "palavra_chave": "",
     "status_label": "A Receber/Recebendo Proposta",
