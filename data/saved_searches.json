@@ -381,11 +381,6 @@
         "uf": ""
       },
       {
-        "codigo_pncp": "3345",
-        "nome": "Bofete",
-        "uf": ""
-      },
-      {
         "codigo_pncp": "3693",
         "nome": "Piedade",
         "uf": ""
@@ -398,6 +393,11 @@
       {
         "codigo_pncp": "3908",
         "nome": "Votorantim",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3523",
+        "nome": "Itapetininga",
         "uf": ""
       }
     ]
