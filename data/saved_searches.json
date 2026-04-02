@@ -575,5 +575,42 @@
         "uf": ""
       }
     ]
+  },
+  "Jo Ovos (SP)": {
+    "palavra_chave": "",
+    "status_label": "A Receber/Recebendo Proposta",
+    "uf": "SP",
+    "municipios": [
+      {
+        "codigo_pncp": "3830",
+        "nome": "São Paulo",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3655",
+        "nome": "Osasco",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3332",
+        "nome": "Barueri",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3389",
+        "nome": "Carapicuíba",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3796",
+        "nome": "Santana de Parnaíba",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3298",
+        "nome": "Araçariguama",
+        "uf": ""
+      }
+    ]
   }
 }
