@@ -448,5 +448,127 @@
         "uf": ""
       }
     ]
+  },
+  "Jo Ovos (Longe)": {
+    "palavra_chave": "",
+    "status_label": "A Receber/Recebendo Proposta",
+    "uf": "SP",
+    "municipios": [
+      {
+        "codigo_pncp": "3863",
+        "nome": "Tapiraí",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3536",
+        "nome": "Itatinga",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3385",
+        "nome": "Capão Bonito",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3721",
+        "nome": "Porto Feliz",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3876",
+        "nome": "Tietê",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3587",
+        "nome": "Mairinque",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3833",
+        "nome": "São Roque",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3540",
+        "nome": "Itu",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3524",
+        "nome": "Itapeva",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3753",
+        "nome": "Ribeirão Grande",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3468",
+        "nome": "Guapiara",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3868",
+        "nome": "Taquarivaí",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3636",
+        "nome": "Nova Campina",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3670",
+        "nome": "Paranapanema",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3517",
+        "nome": "Itaí",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3319",
+        "nome": "Avaré",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3516",
+        "nome": "Itaberá",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3756",
+        "nome": "Riversul",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3529",
+        "nome": "Itaporanga",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3867",
+        "nome": "Taquarituba",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3408",
+        "nome": "Coronel Macedo",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3444",
+        "nome": "Fartura",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3858",
+        "nome": "Taguaí",
+        "uf": ""
+      }
+    ]
   }
 }
