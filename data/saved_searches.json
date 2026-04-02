@@ -530,7 +530,7 @@
     ]
   },
   "Jo Ovos (SP)": {
-    "palavra_chave": "",
+    "palavra_chave": "horti",
     "status_label": "A Receber/Recebendo Proposta",
     "uf": "SP",
     "municipios": [
@@ -562,6 +562,16 @@
       {
         "codigo_pncp": "3298",
         "nome": "Araçariguama",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3551",
+        "nome": "Jandira",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3525",
+        "nome": "Itapevi",
         "uf": ""
       }
     ]
