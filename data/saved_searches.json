@@ -580,5 +580,62 @@
         "uf": ""
       }
     ]
+  },
+  "P&H - Descartável": {
+    "palavra_chave": "",
+    "status_label": "A Receber/Recebendo Proposta",
+    "uf": "SP",
+    "municipios": [
+      {
+        "codigo_pncp": "3908",
+        "nome": "Votorantim",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3849",
+        "nome": "Sorocaba",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3833",
+        "nome": "São Roque",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3587",
+        "nome": "Mairinque",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3693",
+        "nome": "Piedade",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3775",
+        "nome": "Salto",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3540",
+        "nome": "Itu",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3776",
+        "nome": "Salto de Pirapora",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3363",
+        "nome": "Cabreúva",
+        "uf": ""
+      },
+      {
+        "codigo_pncp": "3493",
+        "nome": "Ibiúna",
+        "uf": ""
+      }
+    ]
   }
 }
