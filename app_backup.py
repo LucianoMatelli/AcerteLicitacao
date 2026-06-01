@@ -81,12 +81,23 @@ MAX_MUNICIPIOS = 25
 SAVED_SEARCHES_PATH = os.path.join(BASE_DIR, "saved_searches.json")
 SAVED_TR_PATH = os.path.join(BASE_DIR, "tr_marks.json")
 SAVED_NA_PATH = os.path.join(BASE_DIR, "na_marks.json")
-SAVED_SEARCHES_LOCAL = SAVED_SEARCHES_PATH
-TR_MARKS_LOCAL = SAVED_TR_PATH
-NA_MARKS_LOCAL = SAVED_NA_PATH
+SAVED_SEARCHES_PATHS = [
+    os.path.join(DATA_DIR, "saved_searches.json"),
+    SAVED_SEARCHES_PATH,
+]
+SAVED_TR_PATHS = [
+    os.path.join(DATA_DIR, "tr_marks.json"),
+    SAVED_TR_PATH,
+]
+SAVED_NA_PATHS = [
+    os.path.join(DATA_DIR, "na_marks.json"),
+    SAVED_NA_PATH,
+]
 
+DEFAULT_GITHUB_REPO = "LucianoMatelli/acerte.debug"
 DEFAULT_GITHUB_BRANCH = "main"
 DEFAULT_GITHUB_BASEDIR = "data"
+PERSISTENCE_VERSION = "shared-data-v2"
 
 
 # ==========================
@@ -180,15 +191,45 @@ def _first_dict(*values) -> Dict:
 
 
 def _uid_from_row(row: Dict) -> str:
+    candidates = _uid_candidates_from_row(row)
+    return candidates[0] if candidates else ""
+
+
+def _uid_candidates_from_row(row: Dict) -> List[str]:
+    candidates: List[str] = []
+
+    def _add(value: str) -> None:
+        value = _safe_text(value)
+        if value and value not in candidates:
+            candidates.append(value)
+
     cnpj = _safe_text(row.get("_orgao_cnpj"))
     ano = _safe_text(row.get("_ano"))
     seq = _safe_text(row.get("_seq"))
     if len(cnpj) == 14 and ano.isdigit() and seq:
-        return f"{cnpj}-{ano}-{seq}"
+        _add(f"{cnpj}-{ano}-{seq}")
+        try:
+            seq_int = str(int(seq))
+            _add(f"{cnpj}-{ano}-{seq_int}")
+            _add(f"{cnpj}-{ano}-{seq_int.zfill(6)}")
+        except Exception:
+            pass
+
+    ctrl_cnpj, ctrl_ano, ctrl_seq = _parse_numero_controle(_safe_text(row.get("_id")))
+    if len(ctrl_cnpj) == 14 and ctrl_ano.isdigit() and ctrl_seq:
+        _add(f"{ctrl_cnpj}-{ctrl_ano}-{ctrl_seq}")
+        try:
+            ctrl_seq_int = str(int(ctrl_seq))
+            _add(f"{ctrl_cnpj}-{ctrl_ano}-{ctrl_seq_int}")
+            _add(f"{ctrl_cnpj}-{ctrl_ano}-{ctrl_seq_int.zfill(6)}")
+        except Exception:
+            pass
+
     link = _safe_text(row.get("Link para o edital"))
     match = re.search(r"/app/editais/(\d{14})/(\d{4})/(\w+)", link)
     if match:
-        return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+        _add(f"{match.group(1)}-{match.group(2)}-{match.group(3)}")
+
     base = "|".join(
         [
             _safe_text(row.get("Título") or row.get("Titulo")),
@@ -198,7 +239,8 @@ def _uid_from_row(row: Dict) -> str:
             _safe_text(row.get("Orgão") or row.get("Orgao")),
         ]
     )
-    return hashlib.md5(base.encode("utf-8")).hexdigest()
+    _add(hashlib.md5(base.encode("utf-8")).hexdigest())
+    return candidates
 
 
 def _escape(value) -> str:
@@ -208,15 +250,41 @@ def _escape(value) -> str:
 # ==========================
 # GitHub/local para salvos
 # ==========================
+def _infer_repo_from_git_config() -> str:
+    try:
+        git_cfg = os.path.join(BASE_DIR, ".git", "config")
+        if not os.path.exists(git_cfg):
+            return ""
+        with open(git_cfg, "r", encoding="utf-8") as f:
+            txt = f.read()
+        match = re.search(r"url\s*=\s*(.+github\.com[:/][^/\s]+/[^/\s]+)(?:\.git)?", txt, flags=re.IGNORECASE)
+        if not match:
+            return ""
+        url = match.group(1).strip().replace("\\", "/")
+        repo_match = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?$", url, flags=re.IGNORECASE)
+        return repo_match.group(1) if repo_match else ""
+    except Exception:
+        return ""
+
+
 def _github_repo() -> str:
-    return _secret("GITHUB_REPO")
+    return (
+        _secret("GITHUB_REPO_TEST")
+        or _secret("GITHUB_REPO")
+        or _secret("GITHUB_REPOSITORY")
+        or _infer_repo_from_git_config()
+        or DEFAULT_GITHUB_REPO
+    )
 
 
 def _github_branch() -> str:
-    return _secret("GITHUB_BRANCH", DEFAULT_GITHUB_BRANCH) or DEFAULT_GITHUB_BRANCH
+    return _secret("GITHUB_BRANCH_TEST") or _secret("GITHUB_BRANCH") or DEFAULT_GITHUB_BRANCH
 
 
 def _github_basedir() -> str:
+    basedir_test = _secret("GITHUB_BASEDIR_TEST")
+    if basedir_test:
+        return basedir_test
     return _secret("GITHUB_BASEDIR", DEFAULT_GITHUB_BASEDIR) or DEFAULT_GITHUB_BASEDIR
 
 
@@ -301,21 +369,46 @@ def _gh_put_json(filename: str, payload: dict, sha: Optional[str]) -> None:
     r.raise_for_status()
 
 
-def _load_json(filename: str, local_path: str) -> Dict:
+def _read_json_from_paths(paths: List[str]) -> Optional[dict]:
+    for path in paths:
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            continue
+    return None
+
+
+def _write_json_to_paths(paths: List[str], payload: dict) -> None:
+    target = ""
+    for path in paths:
+        try:
+            if os.path.exists(path):
+                target = path
+                break
+        except Exception:
+            continue
+    if not target:
+        target = paths[0]
+    parent = os.path.dirname(target)
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, exist_ok=True)
+    with open(target, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def _load_json(filename: str, local_paths: List[str]) -> Dict:
     remote, _ = _gh_get_json(filename)
     if isinstance(remote, dict):
         return remote
-    try:
-        if os.path.exists(local_path):
-            with open(local_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except Exception:
-        pass
-    return {}
+    local = _read_json_from_paths(local_paths)
+    return local if isinstance(local, dict) else {}
 
 
-def _persist_json(filename: str, local_path: str, payload: Dict) -> None:
+def _persist_json(filename: str, local_paths: List[str], payload: Dict) -> None:
     try:
         _, sha = _gh_get_json(filename)
         _gh_put_json(filename, payload, sha)
@@ -324,28 +417,26 @@ def _persist_json(filename: str, local_path: str, payload: Dict) -> None:
         st.warning(f"Nao consegui salvar no GitHub; usando arquivo local. Detalhe: {exc}")
 
     try:
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        with open(local_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
+        _write_json_to_paths(local_paths, payload)
     except Exception as exc:
         st.error(f"Falha ao salvar localmente: {exc}")
 
 
 def _load_saved_searches() -> Dict[str, Dict]:
-    return _load_json("saved_searches.json", SAVED_SEARCHES_LOCAL)
+    return _load_json("saved_searches.json", SAVED_SEARCHES_PATHS)
 
 
 def _persist_saved_searches(payload: Dict[str, Dict]) -> None:
-    _persist_json("saved_searches.json", SAVED_SEARCHES_LOCAL, payload)
+    _persist_json("saved_searches.json", SAVED_SEARCHES_PATHS, payload)
 
 
-def _load_marks(filename: str, local_path: str) -> Dict[str, bool]:
-    data = _load_json(filename, local_path)
+def _load_marks(filename: str, local_paths: List[str]) -> Dict[str, bool]:
+    data = _load_json(filename, local_paths)
     return {str(k): bool(v) for k, v in data.items()}
 
 
-def _persist_marks(filename: str, local_path: str, payload: Dict[str, bool]) -> None:
-    _persist_json(filename, local_path, payload)
+def _persist_marks(filename: str, local_paths: List[str], payload: Dict[str, bool]) -> None:
+    _persist_json(filename, local_paths, payload)
 
 
 # ==========================
@@ -818,7 +909,8 @@ def coletar_por_assinatura(signature: dict) -> Tuple[List[Dict], List[str]]:
 def _ensure_session_state() -> None:
     if "selected_municipios" not in st.session_state:
         st.session_state.selected_municipios = []
-    if "saved_searches" not in st.session_state:
+    force_reload_persistence = st.session_state.get("persistence_version") != PERSISTENCE_VERSION
+    if force_reload_persistence or "saved_searches" not in st.session_state:
         st.session_state.saved_searches = _load_saved_searches()
     if "sidebar_inputs" not in st.session_state:
         st.session_state.sidebar_inputs = {
@@ -842,10 +934,11 @@ def _ensure_session_state() -> None:
         st.session_state.card_page = 1
     if "page_size_cards" not in st.session_state:
         st.session_state.page_size_cards = 10
-    if "tr_marks" not in st.session_state:
-        st.session_state.tr_marks = _load_marks("tr_marks.json", TR_MARKS_LOCAL)
-    if "na_marks" not in st.session_state:
-        st.session_state.na_marks = _load_marks("na_marks.json", NA_MARKS_LOCAL)
+    if force_reload_persistence or "tr_marks" not in st.session_state:
+        st.session_state.tr_marks = _load_marks("tr_marks.json", SAVED_TR_PATHS)
+    if force_reload_persistence or "na_marks" not in st.session_state:
+        st.session_state.na_marks = _load_marks("na_marks.json", SAVED_NA_PATHS)
+    st.session_state.persistence_version = PERSISTENCE_VERSION
 
 
 def _normalize_municipio_payload(m: Dict, fallback_uf: str = "") -> Optional[Dict[str, str]]:
@@ -1268,9 +1361,10 @@ def main() -> None:
 
     for _, row in page_df.iterrows():
         row_dict = row.to_dict()
-        uid = _uid_from_row(row_dict)
-        tr_flag = bool(st.session_state.tr_marks.get(uid, False))
-        na_flag = bool(st.session_state.na_marks.get(uid, False))
+        uid_candidates = _uid_candidates_from_row(row_dict)
+        uid = uid_candidates[0]
+        tr_flag = any(bool(st.session_state.tr_marks.get(candidate, False)) for candidate in uid_candidates)
+        na_flag = any(bool(st.session_state.na_marks.get(candidate, False)) for candidate in uid_candidates)
 
         col_spacer, col_cb_tr, col_cb_na = st.columns([6, 1.3, 1.3])
         with col_cb_tr:
@@ -1280,16 +1374,18 @@ def main() -> None:
 
         changed = False
         if new_tr != tr_flag:
-            st.session_state.tr_marks[uid] = bool(new_tr)
+            for candidate in uid_candidates:
+                st.session_state.tr_marks[candidate] = bool(new_tr)
             tr_flag = bool(new_tr)
             changed = True
         if new_na != na_flag:
-            st.session_state.na_marks[uid] = bool(new_na)
+            for candidate in uid_candidates:
+                st.session_state.na_marks[candidate] = bool(new_na)
             na_flag = bool(new_na)
             changed = True
         if changed:
-            _persist_marks("tr_marks.json", TR_MARKS_LOCAL, st.session_state.tr_marks)
-            _persist_marks("na_marks.json", NA_MARKS_LOCAL, st.session_state.na_marks)
+            _persist_marks("tr_marks.json", SAVED_TR_PATHS, st.session_state.tr_marks)
+            _persist_marks("na_marks.json", SAVED_NA_PATHS, st.session_state.na_marks)
             st.rerun()
 
         link = _safe_text(row.get("Link para o edital"))
