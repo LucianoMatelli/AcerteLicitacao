@@ -22,7 +22,7 @@ import streamlit as st
 # Configuracao de pagina
 # ==========================
 st.set_page_config(
-    page_title="Acerte Licitacoes - Backup API PNCP",
+    page_title="Acerte Licitacoes - O seu Buscador de Editais",
     page_icon="📑",
     layout="wide",
 )
@@ -49,7 +49,7 @@ API_CONSULTA_PUBLICACAO = API_CONSULTA_BASE + "/contratacoes/publicacao"
 API_IBGE_MUNICIPIOS_UF = "https://servicodados.ibge.gov.br/api/v1/localidades/estados/{uf}/municipios"
 
 HEADERS = {
-    "User-Agent": "AcerteLicitacoesBackupAPI/2.0 (+streamlit)",
+    "User-Agent": "AcerteLicitacoes/2.0 (+streamlit)",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "pt-BR,pt;q=0.9",
     "Referer": "https://pncp.gov.br/api/consulta/swagger-ui/index.html",
@@ -304,7 +304,7 @@ def _gh_headers() -> Dict[str, str]:
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "AcerteLicitacoesBackupAPI",
+        "User-Agent": "AcerteLicitacoes",
     }
     token = _github_token()
     if token:
@@ -354,7 +354,7 @@ def _gh_put_json(filename: str, payload: dict, sha: Optional[str]) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
     ).decode("utf-8")
     body = {
-        "message": f"chore: atualizar {path} via app backup",
+        "message": f"chore: atualizar {path} via app",
         "content": content_b64,
         "branch": branch,
         "committer": {
@@ -876,8 +876,9 @@ def buscar_municipio_api(municipio: Dict[str, str], status_value: str, q: str) -
     return registros, erros
 
 
-@st.cache_data(ttl=60, show_spinner=False)
 def coletar_por_assinatura(signature: dict) -> Tuple[List[Dict], List[str]]:
+    # Resultado de busca e instabilidade do PNCP nao devem ficar presos em cache.
+    # O estado da tela ja guarda a ultima coleta ate o usuario clicar em Pesquisar de novo.
     registros: List[Dict] = []
     erros: List[str] = []
 
@@ -1083,8 +1084,7 @@ def _sidebar() -> bool:
         for m in st.session_state.selected_municipios:
             c1, c2 = st.sidebar.columns([0.82, 0.18])
             with c1:
-                codigo_info = f"PNCP {m.get('codigo_pncp','') or '?'} | IBGE {m.get('codigo_ibge','')}"
-                st.markdown(f"- **{m['nome']}** / {m.get('uf','')} (`{codigo_info}`)")
+                st.markdown(f"- **{m['nome']}**")
             with c2:
                 if st.button("x", key=f"rm_{m.get('codigo_ibge')}", help=f"Remover {m.get('nome')}"):
                     pass
@@ -1248,10 +1248,10 @@ def _inject_css() -> None:
 
 
 def main() -> None:
-    st.title("Acerte Licitacoes - Backup API PNCP")
+    st.title("Acerte Licitacoes - O seu Buscador de Editais")
     st.caption(
-        "Versao backup usando apenas API oficial PNCP Consulta + municipios IBGE. "
-        "Nao depende da planilha de codigos PNCP."
+        "Selecione os filtros desejados, escolha o Estado (UF) e adicione ate 25 municipios. "
+        "Os editais serao exibidos abaixo em ordem de publicacao."
     )
 
     _inject_css()
@@ -1452,7 +1452,7 @@ def main() -> None:
     st.download_button(
         "Baixar XLSX",
         data=xlsx_bytes,
-        file_name=f"pncp_backup_api_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        file_name=f"pncp_resultados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
         type="primary",
