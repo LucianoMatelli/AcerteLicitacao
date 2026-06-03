@@ -32,6 +32,7 @@ st.set_page_config(
 # Constantes
 # ==========================
 BASE_DIR = os.path.dirname(__file__)
+DATA_DIR = os.path.join(BASE_DIR, "data")
 
 ORIGIN = "https://pncp.gov.br"
 API_CONSULTA_BASE = ORIGIN + "/api/consulta/v1"
@@ -69,13 +70,14 @@ UF_PLACEHOLDER = "— Selecione a UF —"
 MODALIDADES_CONSULTA = list(range(1, 14))
 MAX_MUNICIPIOS = 25
 
-SAVED_SEARCHES_PATH = os.path.join(BASE_DIR, "saved_searches.json")
-SAVED_TR_PATH = os.path.join(BASE_DIR, "tr_marks.json")
-SAVED_NA_PATH = os.path.join(BASE_DIR, "na_marks.json")
+SAVED_SEARCHES_PATH = os.path.join(DATA_DIR, "saved_searches.json")
+SAVED_TR_PATH = os.path.join(DATA_DIR, "tr_marks.json")
+SAVED_NA_PATH = os.path.join(DATA_DIR, "na_marks.json")
 
-DEFAULT_GITHUB_REPO = ""
+DEFAULT_GITHUB_REPO = "LucianoMatelli/AcerteLicitacao"
 DEFAULT_GITHUB_BRANCH = "main"
-PERSISTENCE_VERSION = "api-production-v1"
+DEFAULT_GITHUB_BASEDIR = "data"
+PERSISTENCE_VERSION = "api-production-data-v1"
 
 
 # ==========================
@@ -258,6 +260,10 @@ def _github_branch() -> str:
     return _secret("GITHUB_BRANCH") or DEFAULT_GITHUB_BRANCH
 
 
+def _github_basedir() -> str:
+    return _secret("GITHUB_BASEDIR", DEFAULT_GITHUB_BASEDIR).strip("/")
+
+
 def _github_token() -> str:
     return _secret("GITHUB_TOKEN")
 
@@ -265,7 +271,9 @@ def _github_token() -> str:
 def _github_path(filename: str) -> Tuple[str, str, str]:
     repo = _github_repo()
     branch = _github_branch()
-    return repo, branch, filename
+    basedir = _github_basedir()
+    path = f"{basedir}/{filename}" if basedir else filename
+    return repo, branch, path
 
 
 def _gh_headers() -> Dict[str, str]:
