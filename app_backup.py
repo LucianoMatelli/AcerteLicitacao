@@ -787,43 +787,30 @@ def buscar_municipio_api(municipio: Dict[str, str], status_value: str, q: str) -
         if status_value == "recebendo_proposta":
             data_final = (datetime.now() + timedelta(days=PROPOSTA_DIAS_A_FRENTE)).strftime("%Y%m%d")
             erro_proposta = ""
-            try:
-                rows = _iter_pages(
-                    API_CONSULTA_PROPOSTA,
-                    {
-                        "dataFinal": data_final,
-                        "uf": uf,
-                        "codigoMunicipioIbge": codigo_ibge,
-                    },
-                )
-            except Exception as exc_agregado:
-                rows = []
-                erros_modalidade: List[str] = []
-                if _is_request_rejected_error(exc_agregado):
-                    erro_proposta = "PNCP rejeitou temporariamente a consulta por excesso/bloqueio de requisicoes"
-                else:
-                    for modalidade in MODALIDADES_CONSULTA:
-                        try:
-                            rows.extend(
-                                _iter_pages(
-                                    API_CONSULTA_PROPOSTA,
-                                    {
-                                        "dataFinal": data_final,
-                                        "codigoModalidadeContratacao": modalidade,
-                                        "uf": uf,
-                                        "codigoMunicipioIbge": codigo_ibge,
-                                    },
-                                )
-                            )
-                        except Exception as exc_modalidade:
-                            if _is_request_rejected_error(exc_modalidade):
-                                erros_modalidade.append("PNCP rejeitou temporariamente consultas por modalidade")
-                                break
-                            erros_modalidade.append(f"modalidade {modalidade}: {exc_modalidade}")
-                if not rows:
-                    detalhe = "; ".join(erros_modalidade[:3])
-                    if not erro_proposta:
-                        erro_proposta = f"consulta por proposta falhou ({exc_agregado}); {detalhe}"
+            rows = []
+            erros_modalidade: List[str] = []
+            for modalidade in MODALIDADES_CONSULTA:
+                try:
+                    rows.extend(
+                        _iter_pages(
+                            API_CONSULTA_PROPOSTA,
+                            {
+                                "dataFinal": data_final,
+                                "codigoModalidadeContratacao": modalidade,
+                                "uf": uf,
+                                "codigoMunicipioIbge": codigo_ibge,
+                            },
+                        )
+                    )
+                except Exception as exc_modalidade:
+                    if _is_request_rejected_error(exc_modalidade):
+                        erro_proposta = "PNCP rejeitou temporariamente a consulta por excesso/bloqueio de requisicoes"
+                        erros_modalidade.append("PNCP rejeitou temporariamente consultas por modalidade")
+                        break
+                    erros_modalidade.append(f"modalidade {modalidade}: {exc_modalidade}")
+            if not rows and erros_modalidade and not erro_proposta:
+                detalhe = "; ".join(erros_modalidade[:3])
+                erro_proposta = f"consulta por proposta falhou; {detalhe}"
 
             if not rows:
                 if _is_request_rejected_error(erro_proposta):
