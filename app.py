@@ -878,7 +878,7 @@ def _normalized_selected_municipios(fallback_uf: str = "") -> List[Dict[str, str
 
 
 def _sidebar() -> bool:
-    st.sidebar.header("Filtros")
+    st.sidebar.header("🔎 Filtros")
 
     palavra = st.sidebar.text_input(
         "Palavra-chave (titulo/objeto/orgao):",
@@ -959,7 +959,7 @@ def _sidebar() -> bool:
             st.session_state.selected_municipios = keep
             st.rerun()
 
-    st.sidebar.subheader("Pesquisa salva")
+    st.sidebar.subheader("💾 Pesquisa salva")
     save_name = st.sidebar.text_input(
         "Nome da pesquisa",
         value=st.session_state.sidebar_inputs["save_name"],
@@ -996,7 +996,7 @@ def _sidebar() -> bool:
             _persist_saved_searches(st.session_state.saved_searches)
             st.sidebar.success(f"Pesquisa '{name}' salva.")
 
-    st.sidebar.subheader("Pesquisas salvas")
+    st.sidebar.subheader("📚 Pesquisas salvas")
     saved_names = sorted(st.session_state.saved_searches.keys())
     selected_saved = st.sidebar.selectbox("Carregar pesquisa", ["—"] + saved_names, index=0, key="select_saved")
     carregar = st.sidebar.button("Carregar", use_container_width=True, key="btn_carregar")
@@ -1071,8 +1071,29 @@ def _inject_css() -> None:
           background: #1f4ba8 !important;
           border: 1px solid #173a83 !important;
         }
+        section[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
+          background: #173a83 !important;
+          border-color: #122e67 !important;
+        }
         header[data-testid="stHeader"] { background: transparent !important; box-shadow: none !important; height: 3rem; }
-        div.block-container { padding-top: 2.1rem; background: #f7faff; padding-bottom: 2rem; }
+        div.block-container {
+          padding-top: 2.35rem;
+          padding-bottom: 2rem;
+          max-width: 1180px;
+          background: #f7faff;
+        }
+        .ac-page-title {
+          margin: 0 0 0.35rem 0;
+          color: #07172f;
+          font-size: 2.58rem;
+          line-height: 1.12;
+          font-weight: 800;
+        }
+        .ac-page-caption {
+          color: #526175;
+          font-size: 0.98rem;
+          margin-bottom: 1.7rem;
+        }
         .stDownloadButton > button {
           color: #ffffff !important;
           background: #1f4ba8 !important;
@@ -1080,18 +1101,30 @@ def _inject_css() -> None:
           font-size: 0.7rem !important;
           padding: 0.28rem 0.6rem !important;
         }
-        .ac-card {
-          background: #f8fbff;
-          border: 1.25px solid #cad9f3;
-          border-radius: 18px;
-          padding: 1.05rem 1.2rem;
-          margin-bottom: 1rem;
-          box-shadow: 0 8px 20px rgba(20, 45, 110, 0.06);
+        .stDownloadButton > button:hover {
+          background: #173a83 !important;
+          border-color: #122e67 !important;
         }
-        .ac-card h3 { margin-top: 0; margin-bottom: 0.25rem; font-size: 1.08rem; color: #0b1b36; }
-        .ac-muted { color: #415477; font-size: 0.92rem; }
+        .ac-card {
+          background: #f3f6fb;
+          border: 1px solid #b9d0ee;
+          border-radius: 16px;
+          padding: 1.25rem 1.15rem;
+          margin-bottom: 1rem;
+          box-shadow: none;
+        }
+        .ac-card h3 {
+          margin-top: 0;
+          margin-bottom: 0.7rem;
+          font-size: 1.85rem;
+          font-weight: 700;
+          color: #0b1b36;
+        }
+        .ac-muted { color: #2b4677; font-size: 0.95rem; margin-bottom: 0.65rem; }
+        .ac-obj { margin-top: 0.2rem; margin-bottom: 0.8rem; font-size: 1.04rem; color: #0b1b36; }
+        .ac-meta { margin-top: 0.2rem; font-size: 1rem; color: #0b1b36; }
         .ac-badge {
-          background: #eaf1ff; border: 1px solid #bcd0f7; color: #0b3b8a;
+          background: #eaf1ff; border: 1px solid #bcd0f7; color: #2d62b3;
           padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem;
         }
         .ac-flag {
@@ -1103,8 +1136,9 @@ def _inject_css() -> None:
           padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem; margin-left: 0.5rem;
         }
         .ac-link {
-          text-decoration:none; padding:0.46rem 0.85rem; border-radius:10px;
-          border:1px solid #96b3e9; color:#0b3b8a;
+          text-decoration:none; padding:0.54rem 1rem; border-radius:12px;
+          border:1px solid #8db0ea; color:#2d62b3; background:#f2f7ff;
+          font-weight: 600;
         }
         </style>
         """,
@@ -1113,13 +1147,19 @@ def _inject_css() -> None:
 
 
 def main() -> None:
-    st.title("Acerte Licitacoes - O seu Buscador de Editais")
-    st.caption(
-        "Selecione os filtros desejados, escolha o Estado (UF) e adicione ate 25 municipios. "
-        "Os editais serao exibidos abaixo em ordem de publicacao."
+    _inject_css()
+    st.markdown(
+        """
+        <h1 class="ac-page-title">📄 Acerte Licitações — O seu Buscador de Editais</h1>
+        <div class="ac-page-caption">
+          Selecione os filtros desejados como palavra-chave no título/objeto,
+          selecione o Estado (UF) e até 25 municípios. Os editais serão exibidos
+          abaixo, em ordem de publicação.
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    _inject_css()
     _ensure_session_state()
     disparar_busca = _sidebar()
 
@@ -1268,8 +1308,8 @@ def main() -> None:
                 &nbsp;|&nbsp;
                 <strong>Fim do envio:</strong> {_escape(row.get("Fim do envio de proposta"))}
             </div>
-            <div style="margin-top:0.55rem;"><strong>Objeto:</strong> {_escape(row.get("Objeto"))}</div>
-            <div style="display:flex; gap:1rem; margin-top:0.55rem; flex-wrap:wrap;">
+            <div class="ac-obj"><strong>Objeto:</strong> {_escape(row.get("Objeto"))}</div>
+            <div class="ac-meta" style="display:flex; gap:1rem; flex-wrap:wrap;">
                 <div><strong>Modalidade:</strong> {_escape(row.get("Modalidade"))}</div>
                 <div><strong>Tipo:</strong> {_escape(row.get("Tipo"))}</div>
                 <div><strong>Órgão:</strong> {_escape(row.get("Orgão") or row.get("Orgao"))}</div>
