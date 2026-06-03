@@ -5,89 +5,94 @@
     "uf": "SP",
     "municipios": [
       {
-        "codigo_pncp": "3523",
         "nome": "Itapetininga",
-        "uf": ""
+        "uf": "SP",
+        "codigo_ibge": "3522307"
       },
       {
-        "codigo_pncp": "3359",
         "nome": "Buri",
-        "uf": ""
+        "uf": "SP",
+        "codigo_ibge": "3508009"
       },
       {
-        "codigo_pncp": "3721",
         "nome": "Porto Feliz",
-        "uf": ""
+        "uf": "SP",
+        "codigo_ibge": "3540606"
       },
       {
-        "codigo_pncp": "3405",
         "nome": "Conchas",
-        "uf": ""
+        "uf": "SP",
+        "codigo_ibge": "3512308"
       },
       {
-        "codigo_pncp": "3878",
         "nome": "Torre de Pedra",
-        "uf": ""
+        "uf": "SP",
+        "codigo_ibge": "3554656"
       },
       {
-        "codigo_pncp": "3720",
         "nome": "Porangaba",
-        "uf": ""
+        "uf": "SP",
+        "codigo_ibge": "3540507"
       },
       {
-        "codigo_pncp": "3477",
         "nome": "Guareí",
-        "uf": ""
+        "uf": "SP",
+        "codigo_ibge": "3518503"
       },
       {
-        "codigo_pncp": "3735",
         "nome": "Quadra",
-        "uf": ""
+        "uf": "SP",
+        "codigo_ibge": "3541653"
       },
       {
-        "codigo_pncp": "3292",
         "nome": "Angatuba",
-        "uf": ""
+        "uf": "SP",
+        "codigo_ibge": "3502200"
       },
       {
-        "codigo_pncp": "3385",
         "nome": "Capão Bonito",
-        "uf": ""
+        "uf": "SP",
+        "codigo_ibge": "3510203"
       },
       {
-        "codigo_pncp": "3375",
         "nome": "Campina do Monte Alegre",
-        "uf": ""
+        "uf": "SP",
+        "codigo_ibge": "3509452"
       },
       {
-        "codigo_pncp": "3694",
         "nome": "Pilar do Sul",
-        "uf": ""
+        "uf": "SP",
+        "codigo_ibge": "3537909"
       },
       {
-        "codigo_pncp": "3838",
         "nome": "Sarapuí",
-        "uf": ""
+        "uf": "SP",
+        "codigo_ibge": "3551108"
       },
       {
-        "codigo_pncp": "3386",
         "nome": "Capela do Alto",
-        "uf": ""
+        "uf": "SP",
+        "codigo_ibge": "3510302"
       },
       {
-        "codigo_pncp": "3829",
         "nome": "São Miguel Arcanjo",
-        "uf": ""
+        "uf": "SP",
+        "codigo_ibge": "3550209"
       },
       {
-        "codigo_pncp": "3399",
         "nome": "Cesário Lange",
-        "uf": ""
+        "uf": "SP",
+        "codigo_ibge": "3511607"
       },
       {
-        "codigo_pncp": "3533",
         "nome": "Itararé",
-        "uf": ""
+        "uf": "SP",
+        "codigo_ibge": "3523206"
+      },
+      {
+        "nome": "Pardinho",
+        "uf": "SP",
+        "codigo_ibge": "3536109"
       }
     ]
   },
