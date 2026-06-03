@@ -1078,11 +1078,35 @@ def _inject_css() -> None:
         }
         header[data-testid="stHeader"] { background: transparent !important; box-shadow: none !important; height: 3rem; }
         div.block-container { padding-top: 2.1rem; background: #f7faff; padding-bottom: 2rem; }
+        div.block-container h1 {
+          font-size: 2.6rem !important;
+          line-height: 1.15 !important;
+        }
+        div.block-container [data-testid="stCaptionContainer"] {
+          font-size: 1rem !important;
+          line-height: 1.55 !important;
+        }
+        div.block-container .stAlert [data-testid="stMarkdownContainer"] p,
+        div.block-container .stSelectbox label,
+        div.block-container .stButton > button {
+          font-size: 1rem !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] input,
+        section[data-testid="stSidebar"] button,
+        section[data-testid="stSidebar"] [role="combobox"] {
+          font-size: 0.98rem !important;
+        }
+        section[data-testid="stSidebar"] h2,
+        section[data-testid="stSidebar"] h3 {
+          font-size: 1.12rem !important;
+        }
         .stDownloadButton > button {
           color: #ffffff !important;
           background: #1f4ba8 !important;
           border: 1px solid #173a83 !important;
-          font-size: 0.7rem !important;
+          font-size: 0.9rem !important;
           padding: 0.28rem 0.6rem !important;
         }
         .stDownloadButton > button:hover {
