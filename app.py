@@ -881,7 +881,7 @@ def _sidebar() -> bool:
     st.sidebar.header("🔎 Filtros")
 
     palavra = st.sidebar.text_input(
-        "Palavra-chave (titulo/objeto/orgao):",
+        "Palavra-chave (aplicada no título/objeto):",
         value=st.session_state.sidebar_inputs["palavra_chave"],
         key="palavra_chave_input",
     )
@@ -892,11 +892,12 @@ def _sidebar() -> bool:
         if st.session_state.sidebar_inputs["status_label"] in STATUS_LABELS
         else 0,
         key="status_radio",
+        help="Agrupamentos mapeados para valores aceitos pela API do PNCP.",
     )
 
     uf_options = [UF_PLACEHOLDER] + UFS
     uf = st.sidebar.selectbox(
-        "Estado (UF) - Obrigatorio:",
+        "Estado (UF) — Obrigatório:",
         uf_options,
         index=uf_options.index(st.session_state.sidebar_inputs["uf"])
         if st.session_state.sidebar_inputs["uf"] in uf_options
@@ -908,9 +909,9 @@ def _sidebar() -> bool:
         st.session_state.uf_prev = uf
         st.session_state.municipio_nonce += 1
 
-    st.sidebar.markdown("**Municipios (max. 25)**")
+    st.sidebar.markdown("**Municípios (máx. 25)**")
     if uf == UF_PLACEHOLDER:
-        st.sidebar.info("Selecione uma UF para habilitar os municipios.")
+        st.sidebar.info("Selecione um Estado (UF) para habilitar a seleção de municípios.")
         mun_df = pd.DataFrame()
         chosen = "—"
         add_clicked = False
@@ -919,13 +920,13 @@ def _sidebar() -> bool:
             mun_df = load_municipios_ibge(uf)
             labels = ["—"] + mun_df["label"].tolist()
             chosen = st.sidebar.selectbox(
-                "Adicionar municipio:",
+                "Adicionar município:",
                 labels,
                 index=0,
                 key=f"municipio_select_{st.session_state.municipio_nonce}",
             )
             add_clicked = st.sidebar.button(
-                "Adicionar municipio",
+                "➕ Adicionar município",
                 use_container_width=True,
                 key=f"add_mun_btn_{st.session_state.municipio_nonce}",
             )
@@ -937,7 +938,7 @@ def _sidebar() -> bool:
 
     if add_clicked:
         if chosen == "—":
-            st.sidebar.warning("Selecione um municipio antes de adicionar.")
+            st.sidebar.warning("Selecione um município antes de adicionar.")
         else:
             hit = mun_df[mun_df["label"] == chosen]
             if not hit.empty:
@@ -949,9 +950,9 @@ def _sidebar() -> bool:
         for m in st.session_state.selected_municipios:
             c1, c2 = st.sidebar.columns([0.82, 0.18])
             with c1:
-                st.markdown(f"- **{m['nome']}**")
+                st.markdown(f"- **{m['nome']}** / {m.get('uf', '')}")
             with c2:
-                if st.button("x", key=f"rm_{m.get('codigo_ibge')}", help=f"Remover {m.get('nome')}"):
+                if st.button("✕", key=f"rm_{m.get('codigo_ibge')}", help=f"Remover {m.get('nome')}"):
                     pass
                 else:
                     keep.append(m)
@@ -976,9 +977,9 @@ def _sidebar() -> bool:
         if name and name in st.session_state.saved_searches:
             del st.session_state.saved_searches[name]
             _persist_saved_searches(st.session_state.saved_searches)
-            st.sidebar.success(f"Pesquisa '{name}' excluida.")
+            st.sidebar.success(f"Pesquisa '{name}' excluída.")
         else:
-            st.sidebar.error("Informe o nome exato de uma pesquisa salva.")
+            st.sidebar.error("Informe o nome exato de uma pesquisa salva para excluir.")
 
     if salvar:
         name = save_name.strip()
@@ -1033,9 +1034,9 @@ def _sidebar() -> bool:
     st.session_state.sidebar_inputs["save_name"] = save_name
     st.session_state.sidebar_inputs["selected_saved"] = selected_saved
 
-    pesquisar = st.sidebar.button("Pesquisar", use_container_width=True, type="primary", key="btn_pesquisar")
+    pesquisar = st.sidebar.button("🔎 Pesquisar", use_container_width=True, type="primary", key="btn_pesquisar")
     if pesquisar and uf == UF_PLACEHOLDER:
-        st.sidebar.error("Selecione uma UF para pesquisar.")
+        st.sidebar.error("Selecione uma UF para habilitar a pesquisa.")
         pesquisar = False
     return pesquisar
 
@@ -1076,24 +1077,7 @@ def _inject_css() -> None:
           border-color: #122e67 !important;
         }
         header[data-testid="stHeader"] { background: transparent !important; box-shadow: none !important; height: 3rem; }
-        div.block-container {
-          padding-top: 2.35rem;
-          padding-bottom: 2rem;
-          max-width: 1180px;
-          background: #f7faff;
-        }
-        .ac-page-title {
-          margin: 0 0 0.35rem 0;
-          color: #07172f;
-          font-size: 2.58rem;
-          line-height: 1.12;
-          font-weight: 800;
-        }
-        .ac-page-caption {
-          color: #526175;
-          font-size: 0.98rem;
-          margin-bottom: 1.7rem;
-        }
+        div.block-container { padding-top: 2.1rem; background: #f7faff; padding-bottom: 2rem; }
         .stDownloadButton > button {
           color: #ffffff !important;
           background: #1f4ba8 !important;
@@ -1106,25 +1090,22 @@ def _inject_css() -> None:
           border-color: #122e67 !important;
         }
         .ac-card {
-          background: #f3f6fb;
-          border: 1px solid #b9d0ee;
-          border-radius: 16px;
-          padding: 1.25rem 1.15rem;
+          background: #f8fbff;
+          border: 1.25px solid #cad9f3;
+          border-radius: 18px;
+          padding: 1.05rem 1.2rem;
           margin-bottom: 1rem;
-          box-shadow: none;
+          box-shadow: 0 8px 20px rgba(20, 45, 110, 0.06);
+          transition: box-shadow 0.15s ease, transform 0.15s ease;
         }
-        .ac-card h3 {
-          margin-top: 0;
-          margin-bottom: 0.7rem;
-          font-size: 1.85rem;
-          font-weight: 700;
-          color: #0b1b36;
+        .ac-card:hover {
+          box-shadow: 0 10px 24px rgba(20, 45, 110, 0.10);
+          transform: translateY(-1px);
         }
-        .ac-muted { color: #2b4677; font-size: 0.95rem; margin-bottom: 0.65rem; }
-        .ac-obj { margin-top: 0.2rem; margin-bottom: 0.8rem; font-size: 1.04rem; color: #0b1b36; }
-        .ac-meta { margin-top: 0.2rem; font-size: 1rem; color: #0b1b36; }
+        .ac-card h3 { margin-top: 0; margin-bottom: 0.25rem; font-size: 1.08rem; color: #0b1b36; }
+        .ac-muted { color: #415477; font-size: 0.92rem; }
         .ac-badge {
-          background: #eaf1ff; border: 1px solid #bcd0f7; color: #2d62b3;
+          background: #eaf1ff; border: 1px solid #bcd0f7; color: #0b3b8a;
           padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem;
         }
         .ac-flag {
@@ -1136,9 +1117,8 @@ def _inject_css() -> None:
           padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.82rem; margin-left: 0.5rem;
         }
         .ac-link {
-          text-decoration:none; padding:0.54rem 1rem; border-radius:12px;
-          border:1px solid #8db0ea; color:#2d62b3; background:#f2f7ff;
-          font-weight: 600;
+          text-decoration:none; padding:0.46rem 0.85rem; border-radius:10px;
+          border:1px solid #96b3e9; color:#0b3b8a;
         }
         </style>
         """,
@@ -1147,19 +1127,13 @@ def _inject_css() -> None:
 
 
 def main() -> None:
-    _inject_css()
-    st.markdown(
-        """
-        <h1 class="ac-page-title">📄 Acerte Licitações — O seu Buscador de Editais</h1>
-        <div class="ac-page-caption">
-          Selecione os filtros desejados como palavra-chave no título/objeto,
-          selecione o Estado (UF) e até 25 municípios. Os editais serão exibidos
-          abaixo, em ordem de publicação.
-        </div>
-        """,
-        unsafe_allow_html=True,
+    st.title("📑 Acerte Licitações — O seu Buscador de Editais")
+    st.caption(
+        "Selecione os filtros desejados como palavra-chave no título/objeto, "
+        "selecione o Estado (UF) e até 25 municípios. Os editais serão exibidos abaixo, em ordem de publicação."
     )
 
+    _inject_css()
     _ensure_session_state()
     disparar_busca = _sidebar()
 
@@ -1242,7 +1216,7 @@ def main() -> None:
     col_a, col_b, col_c = st.columns([1, 2, 1])
     with col_a:
         st.button(
-            "Anterior",
+            "◀ Anterior",
             key="prev_top",
             disabled=st.session_state.get("card_page", 1) <= 1,
             on_click=_cb_prev,
@@ -1252,7 +1226,7 @@ def main() -> None:
         st.markdown(f"**Pagina {st.session_state.get('card_page', 1)} de {total_pages}**")
     with col_c:
         st.button(
-            "Proxima",
+            "Próxima ▶",
             key="next_top",
             disabled=st.session_state.get("card_page", 1) >= total_pages,
             on_click=_cb_next,
@@ -1308,8 +1282,8 @@ def main() -> None:
                 &nbsp;|&nbsp;
                 <strong>Fim do envio:</strong> {_escape(row.get("Fim do envio de proposta"))}
             </div>
-            <div class="ac-obj"><strong>Objeto:</strong> {_escape(row.get("Objeto"))}</div>
-            <div class="ac-meta" style="display:flex; gap:1rem; flex-wrap:wrap;">
+            <div style="margin-top:0.55rem;"><strong>Objeto:</strong> {_escape(row.get("Objeto"))}</div>
+            <div style="display:flex; gap:1rem; margin-top:0.55rem; flex-wrap:wrap;">
                 <div><strong>Modalidade:</strong> {_escape(row.get("Modalidade"))}</div>
                 <div><strong>Tipo:</strong> {_escape(row.get("Tipo"))}</div>
                 <div><strong>Órgão:</strong> {_escape(row.get("Orgão") or row.get("Orgao"))}</div>
@@ -1325,7 +1299,7 @@ def main() -> None:
     col_a2, col_b2, col_c2 = st.columns([1, 2, 1])
     with col_a2:
         st.button(
-            "Anterior",
+            "◀ Anterior",
             key="prev_bottom",
             disabled=st.session_state.get("card_page", 1) <= 1,
             on_click=_cb_prev,
@@ -1335,7 +1309,7 @@ def main() -> None:
         st.markdown(f"**Pagina {st.session_state.get('card_page', 1)} de {total_pages}**")
     with col_c2:
         st.button(
-            "Proxima",
+            "Próxima ▶",
             key="next_bottom",
             disabled=st.session_state.get("card_page", 1) >= total_pages,
             on_click=_cb_next,
