@@ -1079,28 +1079,38 @@ def _inject_css() -> None:
         header[data-testid="stHeader"] { background: transparent !important; box-shadow: none !important; height: 3rem; }
         div.block-container { padding-top: 2.1rem; background: #f7faff; padding-bottom: 2rem; }
         div.block-container h1 {
-          font-size: 2.6rem !important;
+          font-size: 2.85rem !important;
           line-height: 1.15 !important;
         }
         div.block-container [data-testid="stCaptionContainer"] {
-          font-size: 1rem !important;
+          font-size: 1.08rem !important;
           line-height: 1.55 !important;
         }
-        div.block-container .stAlert [data-testid="stMarkdownContainer"] p,
+        div.block-container .stAlert [data-testid="stMarkdownContainer"] p {
+          font-size: 1.08rem !important;
+        }
         div.block-container .stSelectbox label,
+        div.block-container .stSelectbox [data-testid="stWidgetLabel"],
         div.block-container .stButton > button {
-          font-size: 1rem !important;
+          font-size: 1.06rem !important;
         }
         section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
-        section[data-testid="stSidebar"] label,
-        section[data-testid="stSidebar"] input,
-        section[data-testid="stSidebar"] button,
-        section[data-testid="stSidebar"] [role="combobox"] {
-          font-size: 0.98rem !important;
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] li,
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] strong,
+        section[data-testid="stSidebar"] [data-testid="stWidgetLabel"],
+        section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] *,
+        section[data-testid="stSidebar"] .stTextInput input,
+        section[data-testid="stSidebar"] [data-baseweb="input"] input,
+        section[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] *,
+        section[data-testid="stSidebar"] .stRadio label,
+        section[data-testid="stSidebar"] .stRadio label *,
+        section[data-testid="stSidebar"] .stButton > button {
+          font-size: 1.06rem !important;
+          line-height: 1.45 !important;
         }
         section[data-testid="stSidebar"] h2,
         section[data-testid="stSidebar"] h3 {
-          font-size: 1.12rem !important;
+          font-size: 1.22rem !important;
         }
         .stDownloadButton > button {
           color: #ffffff !important;
