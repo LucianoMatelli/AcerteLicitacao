@@ -115,12 +115,12 @@ def _secret_int(name: str, default: int, min_value: int = 1, max_value: Optional
 
 
 PAGE_SIZE_API = _secret_int("PNCP_API_TAMANHO_PAGINA", 50, 10, 50)
-MAX_PAGES_API = _secret_int("PNCP_API_MAX_PAGINAS", 30, 1, 200)
-TIMEOUT_API = _secret_int("PNCP_API_TIMEOUT", 30, 5, 120)
+MAX_PAGES_API = _secret_int("PNCP_API_MAX_PAGINAS", 15, 1, 200)
+TIMEOUT_API = _secret_int("PNCP_API_TIMEOUT", 20, 5, 120)
 PROPOSTA_DIAS_A_FRENTE = _secret_int("PNCP_API_PROPOSTA_DIAS_A_FRENTE", 45, 1, 365)
 PUBLICACAO_DIAS_LOOKBACK = _secret_int("PNCP_API_PUBLICACAO_DIAS_LOOKBACK", 365, 1, 365)
-API_RETRIES = _secret_int("PNCP_API_RETRIES", 3, 1, 5)
-API_DELAY_MS = _secret_int("PNCP_API_DELAY_MS", 700, 0, 10000)
+API_RETRIES = _secret_int("PNCP_API_RETRIES", 2, 1, 5)
+API_DELAY_MS = _secret_int("PNCP_API_DELAY_MS", 150, 0, 10000)
 
 
 class PncpRequestRejected(RuntimeError):
@@ -547,6 +547,14 @@ def _status_match_publicacao(item: Dict, status_value: str) -> bool:
 
     situacao = _safe_text(item.get("situacaoCompraId"))
     fim = pd.to_datetime(item.get("dataEncerramentoProposta"), errors="coerce", utc=False)
+    if pd.notna(fim):
+        try:
+            fim = fim.tz_convert(None)
+        except Exception:
+            try:
+                fim = fim.tz_localize(None)
+            except Exception:
+                pass
     now = pd.Timestamp.now()
 
     recebendo = bool(pd.notna(fim) and fim >= now)
@@ -700,7 +708,7 @@ def buscar_municipio_api(municipio: Dict[str, str], status_value: str, q: str) -
             if not rows:
                 if _is_request_rejected_error(erro_proposta):
                     erros.append(f"{municipio.get('nome')} / {uf}: {erro_proposta}. Tente novamente em alguns minutos.")
-                else:
+                elif erro_proposta:
                     rows_publicacao, erros_publicacao = _buscar_publicacao_municipio(uf, codigo_ibge)
                     rows = rows_publicacao
                     aplicar_filtro_publicacao = True
@@ -877,8 +885,47 @@ def _normalized_selected_municipios(fallback_uf: str = "") -> List[Dict[str, str
     return normalized_items
 
 
+def _apply_saved_search_to_state(selected_saved: str) -> None:
+    payload = st.session_state.saved_searches.get(selected_saved, {})
+    municipios: List[Dict[str, str]] = []
+    fallback_uf = _safe_text(payload.get("uf")).upper()
+    raw_municipios = payload.get("municipios") or payload.get("selected_municipios") or []
+    for raw in raw_municipios:
+        if isinstance(raw, dict):
+            normalized = _normalize_municipio_payload(raw, fallback_uf=fallback_uf)
+            if normalized:
+                municipios.append(normalized)
+        elif isinstance(raw, str) and fallback_uf:
+            normalized = resolver_municipio_ibge(raw, fallback_uf)
+            if normalized:
+                municipios.append(normalized)
+
+    palavra_chave = _safe_text(payload.get("palavra_chave"))
+    saved_status = _safe_text(payload.get("status_label"))
+    status_label = saved_status if saved_status in STATUS_LABELS else STATUS_LABELS[0]
+    uf = _safe_text(payload.get("uf")) or UF_PLACEHOLDER
+
+    st.session_state.sidebar_inputs["palavra_chave"] = palavra_chave
+    st.session_state.sidebar_inputs["status_label"] = status_label
+    st.session_state.sidebar_inputs["uf"] = uf
+    st.session_state.sidebar_inputs["save_name"] = selected_saved
+    st.session_state.selected_municipios = municipios
+    st.session_state.uf_prev = uf
+    st.session_state.municipio_nonce += 1
+
+    st.session_state["palavra_chave_input"] = palavra_chave
+    st.session_state["status_radio"] = status_label
+    st.session_state["uf_select"] = uf
+    st.session_state["save_name_input"] = selected_saved
+    st.session_state["select_saved"] = selected_saved
+    st.session_state["saved_search_loaded_message"] = selected_saved
+
+
 def _sidebar() -> bool:
     st.sidebar.header("🔎 Filtros")
+    pending_saved = _safe_text(st.session_state.pop("pending_saved_search_load", ""))
+    if pending_saved:
+        _apply_saved_search_to_state(pending_saved)
 
     palavra = st.sidebar.text_input(
         "Palavra-chave (aplicada no título/objeto):",
@@ -1003,30 +1050,12 @@ def _sidebar() -> bool:
     carregar = st.sidebar.button("Carregar", use_container_width=True, key="btn_carregar")
 
     if carregar and selected_saved and selected_saved != "—":
-        payload = st.session_state.saved_searches.get(selected_saved, {})
-        municipios: List[Dict[str, str]] = []
-        fallback_uf = _safe_text(payload.get("uf")).upper()
-        raw_municipios = payload.get("municipios") or payload.get("selected_municipios") or []
-        for raw in raw_municipios:
-            if isinstance(raw, dict):
-                normalized = _normalize_municipio_payload(raw, fallback_uf=fallback_uf)
-                if normalized:
-                    municipios.append(normalized)
-            elif isinstance(raw, str) and fallback_uf:
-                normalized = resolver_municipio_ibge(raw, fallback_uf)
-                if normalized:
-                    municipios.append(normalized)
-
-        st.session_state.sidebar_inputs["palavra_chave"] = _safe_text(payload.get("palavra_chave"))
-        saved_status = _safe_text(payload.get("status_label"))
-        st.session_state.sidebar_inputs["status_label"] = saved_status if saved_status in STATUS_LABELS else STATUS_LABELS[0]
-        st.session_state.sidebar_inputs["uf"] = _safe_text(payload.get("uf")) or UF_PLACEHOLDER
-        st.session_state.sidebar_inputs["save_name"] = selected_saved
-        st.session_state.selected_municipios = municipios
-        st.session_state.uf_prev = st.session_state.sidebar_inputs["uf"]
-        st.session_state.municipio_nonce += 1
-        st.sidebar.success(f"Pesquisa '{selected_saved}' carregada.")
+        st.session_state.pending_saved_search_load = selected_saved
         st.rerun()
+
+    loaded_message = _safe_text(st.session_state.pop("saved_search_loaded_message", ""))
+    if loaded_message:
+        st.sidebar.success(f"Pesquisa '{loaded_message}' carregada.")
 
     st.session_state.sidebar_inputs["palavra_chave"] = palavra
     st.session_state.sidebar_inputs["status_label"] = status_label
