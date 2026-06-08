@@ -123,6 +123,7 @@ PROPOSTA_DIAS_A_FRENTE = _secret_int("PNCP_API_PROPOSTA_DIAS_A_FRENTE", 45, 1, 3
 PUBLICACAO_DIAS_LOOKBACK = _secret_int("PNCP_API_PUBLICACAO_DIAS_LOOKBACK", 365, 1, 365)
 API_RETRIES = _secret_int("PNCP_API_RETRIES", 2, 1, 5)
 API_DELAY_MS = _secret_int("PNCP_API_DELAY_MS", 150, 0, 10000)
+MUNICIPIOS_POR_LOTE = _secret_int("PNCP_API_MUNICIPIOS_POR_LOTE", 1, 1, 5)
 
 
 class PncpRequestRejected(RuntimeError):
@@ -758,6 +759,20 @@ def buscar_municipio_api(municipio: Dict[str, str], status_value: str, q: str) -
     return registros, erros
 
 
+def _ordenar_registros(registros: List[Dict]) -> List[Dict]:
+    if not registros:
+        return []
+
+    df = pd.DataFrame(registros)
+    try:
+        df["_pub_dt"] = pd.to_datetime(df["_pub_raw"], errors="coerce", utc=False)
+    except Exception:
+        df["_pub_dt"] = pd.NaT
+    df.sort_values("_pub_dt", ascending=False, na_position="last", inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    return df.to_dict("records")
+
+
 def coletar_por_assinatura(signature: dict) -> Tuple[List[Dict], List[str]]:
     # Resultado de busca e instabilidade do PNCP nao devem ficar presos em cache.
     # O estado da tela ja guarda a ultima coleta ate o usuario clicar em Pesquisar de novo.
@@ -773,17 +788,89 @@ def coletar_por_assinatura(signature: dict) -> Tuple[List[Dict], List[str]]:
         registros.extend(rows)
         erros.extend(err)
 
-    if not registros:
-        return [], erros
+    return _ordenar_registros(registros), erros
 
-    df = pd.DataFrame(registros)
-    try:
-        df["_pub_dt"] = pd.to_datetime(df["_pub_raw"], errors="coerce", utc=False)
-    except Exception:
-        df["_pub_dt"] = pd.NaT
-    df.sort_values("_pub_dt", ascending=False, na_position="last", inplace=True)
-    df.reset_index(drop=True, inplace=True)
-    return df.to_dict("records"), erros
+
+def _iniciar_busca_incremental(signature: dict) -> None:
+    st.session_state.search_job = {
+        "signature": signature,
+        "next_index": 0,
+        "records": [],
+        "errors": [],
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    st.session_state.results_df = None
+    st.session_state.result_errors = []
+    st.session_state.results_signature = None
+    st.session_state.card_page = 1
+
+
+def _processar_lote_busca_incremental() -> Optional[Tuple[List[Dict], List[str]]]:
+    job = st.session_state.get("search_job")
+    if not isinstance(job, dict):
+        return None
+
+    signature = job.get("signature") if isinstance(job.get("signature"), dict) else {}
+    municipios = signature.get("municipios_meta", [])
+    if not isinstance(municipios, list):
+        municipios = []
+
+    total = len(municipios)
+    next_index = max(0, int(job.get("next_index") or 0))
+    registros = job.get("records") if isinstance(job.get("records"), list) else []
+    erros = job.get("errors") if isinstance(job.get("errors"), list) else []
+
+    if total <= 0:
+        st.session_state.pop("search_job", None)
+        return [], ["Nenhum município válido encontrado para pesquisar."]
+
+    if next_index >= total:
+        registros_ordenados = _ordenar_registros(registros)
+        st.session_state.results_df = registros_ordenados
+        st.session_state.result_errors = erros
+        st.session_state.results_signature = signature
+        st.session_state.card_page = 1
+        st.session_state.pop("search_job", None)
+        return registros_ordenados, erros
+
+    lote_fim = min(total, next_index + MUNICIPIOS_POR_LOTE)
+    lote = municipios[next_index:lote_fim]
+    cidade_atual = ", ".join(
+        f"{_safe_text(m.get('nome'))}/{_safe_text(m.get('uf')).upper()}" for m in lote if isinstance(m, dict)
+    )
+
+    st.info(f"Pesquisa em andamento: {next_index} de {total} municípios concluídos.")
+    st.progress(next_index / total)
+    with st.spinner(f"Consultando PNCP: {cidade_atual}"):
+        for municipio in lote:
+            if not isinstance(municipio, dict):
+                continue
+            rows, err = buscar_municipio_api(
+                municipio=municipio,
+                status_value=_safe_text(signature.get("status")),
+                q=_safe_text(signature.get("q")),
+            )
+            registros.extend(rows)
+            erros.extend(err)
+
+    job["next_index"] = lote_fim
+    job["records"] = registros
+    job["errors"] = erros
+    st.session_state.search_job = job
+
+    if lote_fim >= total:
+        registros_ordenados = _ordenar_registros(registros)
+        st.session_state.results_df = registros_ordenados
+        st.session_state.result_errors = erros
+        st.session_state.results_signature = signature
+        st.session_state.card_page = 1
+        st.session_state.pop("search_job", None)
+        return registros_ordenados, erros
+
+    st.info(f"Pesquisa parcial: {lote_fim} de {total} municípios concluídos. Continuando automaticamente...")
+    st.progress(lote_fim / total)
+    time.sleep(0.2)
+    st.rerun()
 
 
 # ==========================
@@ -1231,12 +1318,19 @@ def main() -> None:
         if not signature["municipios"]:
             st.warning("Selecione pelo menos um municipio para pesquisar.")
             st.stop()
-        with st.spinner("Consultando API oficial PNCP..."):
-            records, errors = coletar_por_assinatura(signature)
-        st.session_state.results_df = records
-        st.session_state.result_errors = errors
-        st.session_state.results_signature = signature
-        st.session_state.card_page = 1
+        _iniciar_busca_incremental(signature)
+        st.rerun()
+
+    busca_incremental = st.session_state.get("search_job")
+    if isinstance(busca_incremental, dict):
+        if st.button("Cancelar pesquisa em andamento"):
+            st.session_state.pop("search_job", None)
+            st.info("Pesquisa cancelada.")
+            st.stop()
+        resultado_incremental = _processar_lote_busca_incremental()
+        if resultado_incremental is None:
+            st.stop()
+        records, errors = resultado_incremental
     else:
         if st.session_state.results_df is None:
             st.info("Configure os filtros e clique em **Pesquisar**.")
