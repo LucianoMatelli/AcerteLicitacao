@@ -890,6 +890,16 @@ def _ensure_session_state() -> None:
             "save_name": "",
             "selected_saved": None,
         }
+    if "palavra_chave_input" not in st.session_state:
+        st.session_state.palavra_chave_input = st.session_state.sidebar_inputs["palavra_chave"]
+    if "status_radio" not in st.session_state:
+        st.session_state.status_radio = st.session_state.sidebar_inputs["status_label"]
+    if "uf_select" not in st.session_state:
+        st.session_state.uf_select = st.session_state.sidebar_inputs["uf"]
+    if "save_name_input" not in st.session_state:
+        st.session_state.save_name_input = st.session_state.sidebar_inputs["save_name"]
+    if "select_saved" not in st.session_state:
+        st.session_state.select_saved = "—"
     if "uf_prev" not in st.session_state:
         st.session_state.uf_prev = UF_PLACEHOLDER
     if "municipio_nonce" not in st.session_state:
@@ -993,6 +1003,8 @@ def _apply_saved_search_to_state(selected_saved: str) -> None:
     saved_status = _safe_text(payload.get("status_label"))
     status_label = saved_status if saved_status in STATUS_LABELS else STATUS_LABELS[0]
     uf = _safe_text(payload.get("uf")) or UF_PLACEHOLDER
+    if uf not in UFS and uf != UF_PLACEHOLDER:
+        uf = UF_PLACEHOLDER
 
     st.session_state.sidebar_inputs["palavra_chave"] = palavra_chave
     st.session_state.sidebar_inputs["status_label"] = status_label
@@ -1016,28 +1028,25 @@ def _sidebar() -> bool:
     if pending_saved:
         _apply_saved_search_to_state(pending_saved)
 
+    if st.session_state.get("status_radio") not in STATUS_LABELS:
+        st.session_state.status_radio = STATUS_LABELS[0]
     palavra = st.sidebar.text_input(
         "Palavra-chave (aplicada no título/objeto):",
-        value=st.session_state.sidebar_inputs["palavra_chave"],
         key="palavra_chave_input",
     )
     status_label = st.sidebar.radio(
         "Status",
         STATUS_LABELS,
-        index=STATUS_LABELS.index(st.session_state.sidebar_inputs["status_label"])
-        if st.session_state.sidebar_inputs["status_label"] in STATUS_LABELS
-        else 0,
         key="status_radio",
         help="Agrupamentos mapeados para valores aceitos pela API do PNCP.",
     )
 
     uf_options = [UF_PLACEHOLDER] + UFS
+    if st.session_state.get("uf_select") not in uf_options:
+        st.session_state.uf_select = UF_PLACEHOLDER
     uf = st.sidebar.selectbox(
         "Estado (UF) — Obrigatório:",
         uf_options,
-        index=uf_options.index(st.session_state.sidebar_inputs["uf"])
-        if st.session_state.sidebar_inputs["uf"] in uf_options
-        else 0,
         key="uf_select",
     )
 
@@ -1099,7 +1108,6 @@ def _sidebar() -> bool:
     st.sidebar.subheader("💾 Pesquisa salva")
     save_name = st.sidebar.text_input(
         "Nome da pesquisa",
-        value=st.session_state.sidebar_inputs["save_name"],
         key="save_name_input",
     )
     col_s1, col_s2 = st.sidebar.columns(2)
@@ -1135,7 +1143,10 @@ def _sidebar() -> bool:
 
     st.sidebar.subheader("📚 Pesquisas salvas")
     saved_names = sorted(st.session_state.saved_searches.keys())
-    selected_saved = st.sidebar.selectbox("Carregar pesquisa", ["—"] + saved_names, index=0, key="select_saved")
+    saved_options = ["—"] + saved_names
+    if st.session_state.get("select_saved") not in saved_options:
+        st.session_state.select_saved = "—"
+    selected_saved = st.sidebar.selectbox("Carregar pesquisa", saved_options, key="select_saved")
     carregar = st.sidebar.button("Carregar", use_container_width=True, key="btn_carregar")
 
     if carregar and selected_saved and selected_saved != "—":
@@ -1358,12 +1369,12 @@ def main() -> None:
         df.sort_values("_pub_dt", ascending=False, na_position="last", inplace=True)
         df.reset_index(drop=True, inplace=True)
 
+    page_size_options = [10, 20, 50]
+    if st.session_state.get("page_size_cards") not in page_size_options:
+        st.session_state.page_size_cards = 10
     st.selectbox(
         "Itens por pagina",
-        [10, 20, 50],
-        index=[10, 20, 50].index(st.session_state.get("page_size_cards", 10))
-        if st.session_state.get("page_size_cards", 10) in [10, 20, 50]
-        else 0,
+        page_size_options,
         key="page_size_cards",
         on_change=_cb_page_size_change,
     )
