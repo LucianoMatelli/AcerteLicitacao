@@ -13,6 +13,8 @@ import unicodedata
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
+os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
+
 import pandas as pd
 import requests
 import streamlit as st
