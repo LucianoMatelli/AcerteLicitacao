@@ -759,7 +759,27 @@ def buscar_municipio_api(municipio: Dict[str, str], status_value: str, q: str) -
     return registros, erros
 
 
+def _deduplicar_registros(registros: List[Dict]) -> List[Dict]:
+    deduplicados: List[Dict] = []
+    vistos = set()
+    for registro in registros:
+        uid_candidates = _uid_candidates_from_row(registro)
+        uid = uid_candidates[0] if uid_candidates else ""
+        if not uid:
+            uid = hashlib.md5(
+                json.dumps(registro, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+        if uid in vistos:
+            continue
+        vistos.add(uid)
+        deduplicados.append(registro)
+    return deduplicados
+
+
 def _ordenar_registros(registros: List[Dict]) -> List[Dict]:
+    if not registros:
+        return []
+    registros = _deduplicar_registros(registros)
     if not registros:
         return []
 
@@ -1330,7 +1350,7 @@ def main() -> None:
             st.warning("Selecione pelo menos um municipio para pesquisar.")
             st.stop()
         _iniciar_busca_incremental(signature)
-        st.rerun()
+        st.info("Nova pesquisa iniciada. Limpando resultados anteriores...")
 
     busca_incremental = st.session_state.get("search_job")
     if isinstance(busca_incremental, dict):
@@ -1407,18 +1427,21 @@ def main() -> None:
     end = start + page_size
     page_df = df.iloc[start:end].copy()
 
-    for _, row in page_df.iterrows():
+    for pos, (_, row) in enumerate(page_df.iterrows(), start=start):
         row_dict = row.to_dict()
         uid_candidates = _uid_candidates_from_row(row_dict)
-        uid = uid_candidates[0]
+        uid = uid_candidates[0] if uid_candidates else hashlib.md5(str(pos).encode("utf-8")).hexdigest()
+        if not uid_candidates:
+            uid_candidates = [uid]
+        widget_uid = f"{uid}_{pos}"
         tr_flag = any(bool(st.session_state.tr_marks.get(candidate, False)) for candidate in uid_candidates)
         na_flag = any(bool(st.session_state.na_marks.get(candidate, False)) for candidate in uid_candidates)
 
         col_spacer, col_cb_tr, col_cb_na = st.columns([6, 1.3, 1.3])
         with col_cb_tr:
-            new_tr = st.checkbox("TR Elaborado", value=tr_flag, key=f"tr_{uid}")
+            new_tr = st.checkbox("TR Elaborado", value=tr_flag, key=f"tr_{widget_uid}")
         with col_cb_na:
-            new_na = st.checkbox("Não Atende", value=na_flag, key=f"na_{uid}")
+            new_na = st.checkbox("Não Atende", value=na_flag, key=f"na_{widget_uid}")
 
         changed = False
         if new_tr != tr_flag:
