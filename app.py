@@ -79,7 +79,7 @@ SAVED_NA_PATH = os.path.join(DATA_DIR, "na_marks.json")
 DEFAULT_GITHUB_REPO = "LucianoMatelli/AcerteLicitacao"
 DEFAULT_GITHUB_BRANCH = "main"
 DEFAULT_GITHUB_BASEDIR = "data"
-PERSISTENCE_VERSION = "api-production-data-v1"
+PERSISTENCE_VERSION = "api-production-data-v2"
 
 
 # ==========================
@@ -121,8 +121,8 @@ MAX_PAGES_API = _secret_int("PNCP_API_MAX_PAGINAS", 15, 1, 200)
 TIMEOUT_API = _secret_int("PNCP_API_TIMEOUT", 20, 5, 120)
 PROPOSTA_DIAS_A_FRENTE = _secret_int("PNCP_API_PROPOSTA_DIAS_A_FRENTE", 45, 1, 365)
 PUBLICACAO_DIAS_LOOKBACK = _secret_int("PNCP_API_PUBLICACAO_DIAS_LOOKBACK", 365, 1, 365)
-API_RETRIES = _secret_int("PNCP_API_RETRIES", 2, 1, 5)
-API_DELAY_MS = _secret_int("PNCP_API_DELAY_MS", 150, 0, 10000)
+API_RETRIES = _secret_int("PNCP_API_RETRIES", 3, 1, 5)
+API_DELAY_MS = _secret_int("PNCP_API_DELAY_MS", 250, 0, 10000)
 MUNICIPIOS_POR_LOTE = _secret_int("PNCP_API_MUNICIPIOS_POR_LOTE", 1, 1, 5)
 
 
@@ -377,12 +377,29 @@ def _load_json(filename: str, local_path: str) -> Dict:
 
 
 def _persist_json(filename: str, local_path: str, payload: Dict) -> None:
+    last_error: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            _, sha = _gh_get_json(filename)
+            _gh_put_json(filename, payload, sha)
+            return
+        except requests.HTTPError as exc:
+            last_error = exc
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None)
+            if status_code == 409 and attempt == 0:
+                time.sleep(0.5)
+                continue
+            break
+        except Exception as exc:
+            last_error = exc
+            break
+
+    detalhe = last_error if last_error else "erro desconhecido"
     try:
-        _, sha = _gh_get_json(filename)
-        _gh_put_json(filename, payload, sha)
-        return
-    except Exception as exc:
-        st.warning(f"Nao consegui salvar no GitHub; usando arquivo local. Detalhe: {exc}")
+        st.warning(f"Nao consegui salvar no GitHub; usando arquivo local. Detalhe: {detalhe}")
+    except Exception:
+        pass
 
     try:
         _write_json_to_path(local_path, payload)
@@ -477,6 +494,13 @@ def _get_api_page(url: str, params: Dict[str, object]) -> Tuple[List[Dict], int]
             if API_DELAY_MS > 0:
                 time.sleep(API_DELAY_MS / 1000)
             r = requests.get(url, params=params, headers=HEADERS, timeout=TIMEOUT_API)
+            body = (r.text or "").strip()
+            body_lower = body.lower()
+            if r.status_code == 429 or "request rejected" in body_lower or "support id" in body_lower:
+                raise PncpRequestRejected(
+                    f"request_rejected: PNCP rejeitou temporariamente a requisicao HTTP {r.status_code}"
+                )
+
             if r.status_code >= 500 and attempt < API_RETRIES - 1:
                 time.sleep(0.6 * (attempt + 1))
                 continue
@@ -486,12 +510,8 @@ def _get_api_page(url: str, params: Dict[str, object]) -> Tuple[List[Dict], int]
             if r.status_code >= 400:
                 raise RuntimeError(f"HTTP {r.status_code}: {(r.text or '')[:180]}")
 
-            body = (r.text or "").strip()
             if not body:
                 return [], 0
-            body_lower = body.lower()
-            if "request rejected" in body_lower or "support id" in body_lower:
-                raise PncpRequestRejected("request_rejected: PNCP rejeitou temporariamente a requisicao")
 
             try:
                 js = r.json()
@@ -678,6 +698,10 @@ def buscar_municipio_api(municipio: Dict[str, str], status_value: str, q: str) -
     erros: List[str] = []
     vistos = set()
     aplicar_filtro_publicacao = status_value != "recebendo_proposta"
+    nome_municipio = _safe_text(municipio.get("nome")) or "(município sem nome)"
+
+    if not codigo_ibge or not uf:
+        return [], [f"{nome_municipio} / {uf or '?'}: município sem código IBGE válido."]
 
     try:
         if status_value == "recebendo_proposta":
@@ -710,7 +734,7 @@ def buscar_municipio_api(municipio: Dict[str, str], status_value: str, q: str) -
 
             if not rows:
                 if _is_request_rejected_error(erro_proposta):
-                    erros.append(f"{municipio.get('nome')} / {uf}: {erro_proposta}. Tente novamente em alguns minutos.")
+                    erros.append(f"{nome_municipio} / {uf}: {erro_proposta}. Tente novamente em alguns minutos.")
                 elif erro_proposta:
                     rows_publicacao, erros_publicacao = _buscar_publicacao_municipio(uf, codigo_ibge)
                     rows = rows_publicacao
@@ -718,43 +742,46 @@ def buscar_municipio_api(municipio: Dict[str, str], status_value: str, q: str) -
                     if not rows_publicacao and erros_publicacao:
                         detalhe = "; ".join(erros_publicacao[:3])
                         prefixo = f"{erro_proposta}; " if erro_proposta else ""
-                        erros.append(f"{municipio.get('nome')} / {uf}: {prefixo}recuperacao por publicacao falhou; {detalhe}")
+                        erros.append(f"{nome_municipio} / {uf}: {prefixo}recuperacao por publicacao falhou; {detalhe}")
         else:
             rows, erros_publicacao = _buscar_publicacao_municipio(uf, codigo_ibge)
             if not rows and erros_publicacao:
                 detalhe = "; ".join(erros_publicacao[:3])
-                erros.append(f"{municipio.get('nome')} / {uf}: consulta por publicacao falhou; {detalhe}")
+                erros.append(f"{nome_municipio} / {uf}: consulta por publicacao falhou; {detalhe}")
     except Exception as exc:
-        erros.append(f"{municipio.get('nome')} / {uf}: {exc}")
+        erros.append(f"{nome_municipio} / {uf}: {exc}")
         rows = []
 
     q_norm = _norm(q)
     for item in rows:
-        if aplicar_filtro_publicacao and not _status_match_publicacao(item, status_value):
-            continue
-
-        key = _dedupe_key(item)
-        if key in vistos:
-            continue
-        vistos.add(key)
-
-        registro = _normalizar_item(item, municipio)
-
-        if q_norm:
-            alvo = _norm(
-                " ".join(
-                    [
-                        registro.get("Título", ""),
-                        registro.get("Objeto", ""),
-                        registro.get("Orgão", ""),
-                        registro.get("Modalidade", ""),
-                    ]
-                )
-            )
-            if q_norm not in alvo:
+        try:
+            if aplicar_filtro_publicacao and not _status_match_publicacao(item, status_value):
                 continue
 
-        registros.append(registro)
+            key = _dedupe_key(item)
+            if key in vistos:
+                continue
+            vistos.add(key)
+
+            registro = _normalizar_item(item, municipio)
+
+            if q_norm:
+                alvo = _norm(
+                    " ".join(
+                        [
+                            registro.get("Título", ""),
+                            registro.get("Objeto", ""),
+                            registro.get("Orgão", ""),
+                            registro.get("Modalidade", ""),
+                        ]
+                    )
+                )
+                if q_norm not in alvo:
+                    continue
+
+            registros.append(registro)
+        except Exception as exc:
+            erros.append(f"{nome_municipio} / {uf}: item ignorado por erro de normalizacao: {exc}")
 
     return registros, erros
 
@@ -859,8 +886,11 @@ def _processar_lote_busca_incremental() -> Optional[Tuple[List[Dict], List[str]]
         f"{_safe_text(m.get('nome'))}/{_safe_text(m.get('uf')).upper()}" for m in lote if isinstance(m, dict)
     )
 
-    st.info(f"Pesquisa em andamento: {next_index} de {total} municípios concluídos.")
-    st.progress(next_index / total)
+    progress_container = st.container()
+    with progress_container:
+        st.info(f"Pesquisa em andamento: {next_index} de {total} municípios concluídos.")
+        progress_bar = st.progress(next_index / total)
+
     with st.spinner(f"Consultando PNCP: {cidade_atual}"):
         for municipio in lote:
             if not isinstance(municipio, dict):
@@ -887,8 +917,7 @@ def _processar_lote_busca_incremental() -> Optional[Tuple[List[Dict], List[str]]
         st.session_state.pop("search_job", None)
         return registros_ordenados, erros
 
-    st.info(f"Pesquisa parcial: {lote_fim} de {total} municípios concluídos. Continuando automaticamente...")
-    st.progress(lote_fim / total)
+    progress_bar.progress(lote_fim / total)
     time.sleep(0.2)
     st.rerun()
 
@@ -929,6 +958,11 @@ def _ensure_session_state() -> None:
     if "results_signature" not in st.session_state:
         st.session_state.results_signature = None
     if "result_errors" not in st.session_state:
+        st.session_state.result_errors = []
+    if force_reload_persistence:
+        st.session_state.pop("search_job", None)
+        st.session_state.results_df = None
+        st.session_state.results_signature = None
         st.session_state.result_errors = []
     if "card_page" not in st.session_state:
         st.session_state.card_page = 1
@@ -1015,7 +1049,10 @@ def _apply_saved_search_to_state(selected_saved: str) -> None:
             if normalized:
                 municipios.append(normalized)
         elif isinstance(raw, str) and fallback_uf:
-            normalized = resolver_municipio_ibge(raw, fallback_uf)
+            try:
+                normalized = resolver_municipio_ibge(raw, fallback_uf)
+            except Exception:
+                normalized = None
             if normalized:
                 municipios.append(normalized)
 
@@ -1350,11 +1387,10 @@ def main() -> None:
             st.warning("Selecione pelo menos um municipio para pesquisar.")
             st.stop()
         _iniciar_busca_incremental(signature)
-        st.info("Nova pesquisa iniciada. Limpando resultados anteriores...")
 
     busca_incremental = st.session_state.get("search_job")
     if isinstance(busca_incremental, dict):
-        if st.button("Cancelar pesquisa em andamento"):
+        if st.button("Cancelar pesquisa em andamento", key="btn_cancelar_pesquisa"):
             st.session_state.pop("search_job", None)
             st.info("Pesquisa cancelada.")
             st.stop()
