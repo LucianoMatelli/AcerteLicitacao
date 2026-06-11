@@ -118,12 +118,14 @@ def _secret_int(name: str, default: int, min_value: int = 1, max_value: Optional
 
 PAGE_SIZE_API = _secret_int("PNCP_API_TAMANHO_PAGINA", 50, 10, 50)
 MAX_PAGES_API = _secret_int("PNCP_API_MAX_PAGINAS", 15, 1, 200)
-TIMEOUT_API = _secret_int("PNCP_API_TIMEOUT", 20, 5, 120)
+TIMEOUT_API = _secret_int("PNCP_API_TIMEOUT", 8, 3, 10)
 PROPOSTA_DIAS_A_FRENTE = _secret_int("PNCP_API_PROPOSTA_DIAS_A_FRENTE", 45, 1, 365)
 PUBLICACAO_DIAS_LOOKBACK = _secret_int("PNCP_API_PUBLICACAO_DIAS_LOOKBACK", 365, 1, 365)
-API_RETRIES = _secret_int("PNCP_API_RETRIES", 3, 1, 5)
-API_DELAY_MS = _secret_int("PNCP_API_DELAY_MS", 250, 0, 10000)
+API_RETRIES = _secret_int("PNCP_API_RETRIES", 2, 1, 2)
+API_DELAY_MS = _secret_int("PNCP_API_DELAY_MS", 250, 0, 1000)
 MUNICIPIOS_POR_LOTE = _secret_int("PNCP_API_MUNICIPIOS_POR_LOTE", 1, 1, 5)
+TEMPO_MAX_MUNICIPIO = _secret_int("PNCP_API_TEMPO_MAX_MUNICIPIO", 45, 15, 180)
+MAX_ERROS_MODALIDADE = _secret_int("PNCP_API_MAX_ERROS_MODALIDADE", 3, 1, 13)
 
 
 class PncpRequestRejected(RuntimeError):
@@ -548,10 +550,12 @@ def _get_api_page(url: str, params: Dict[str, object]) -> Tuple[List[Dict], int]
     raise RuntimeError(f"request_error: {last_error}")
 
 
-def _iter_pages(url: str, base_params: Dict[str, object]) -> List[Dict]:
+def _iter_pages(url: str, base_params: Dict[str, object], deadline_at: Optional[float] = None) -> List[Dict]:
     items: List[Dict] = []
     total_pages = 0
     for page in range(1, MAX_PAGES_API + 1):
+        if deadline_at and time.monotonic() >= deadline_at:
+            break
         params = dict(base_params)
         params["pagina"] = page
         params["tamanhoPagina"] = PAGE_SIZE_API
@@ -593,14 +597,24 @@ def _status_match_publicacao(item: Dict, status_value: str) -> bool:
     return True
 
 
-def _buscar_publicacao_municipio(uf: str, codigo_ibge: str) -> Tuple[List[Dict], List[str]]:
+def _buscar_publicacao_municipio(
+    uf: str, codigo_ibge: str, deadline_at: Optional[float] = None
+) -> Tuple[List[Dict], List[str]]:
     data_final = datetime.now().strftime("%Y%m%d")
     data_inicial = (datetime.now() - timedelta(days=PUBLICACAO_DIAS_LOOKBACK)).strftime("%Y%m%d")
     rows: List[Dict] = []
     erros: List[str] = []
 
+    erros_consecutivos = 0
     for modalidade in MODALIDADES_CONSULTA:
+        if deadline_at and time.monotonic() >= deadline_at:
+            erros.append("tempo maximo por municipio atingido durante consultas por publicacao")
+            break
+        if erros_consecutivos >= MAX_ERROS_MODALIDADE:
+            erros.append("muitas falhas seguidas por modalidade; municipio interrompido para evitar travamento")
+            break
         try:
+            antes = len(rows)
             rows.extend(
                 _iter_pages(
                     API_CONSULTA_PUBLICACAO,
@@ -611,9 +625,12 @@ def _buscar_publicacao_municipio(uf: str, codigo_ibge: str) -> Tuple[List[Dict],
                         "uf": uf,
                         "codigoMunicipioIbge": codigo_ibge,
                     },
+                    deadline_at=deadline_at,
                 )
             )
+            erros_consecutivos = 0 if len(rows) > antes else erros_consecutivos
         except Exception as exc:
+            erros_consecutivos += 1
             if _is_request_rejected_error(exc):
                 erros.append("PNCP rejeitou temporariamente consultas por publicacao")
                 break
@@ -703,14 +720,24 @@ def buscar_municipio_api(municipio: Dict[str, str], status_value: str, q: str) -
     if not codigo_ibge or not uf:
         return [], [f"{nome_municipio} / {uf or '?'}: município sem código IBGE válido."]
 
+    deadline_at = time.monotonic() + TEMPO_MAX_MUNICIPIO
+
     try:
         if status_value == "recebendo_proposta":
             data_final = (datetime.now() + timedelta(days=PROPOSTA_DIAS_A_FRENTE)).strftime("%Y%m%d")
             erro_proposta = ""
             rows = []
             erros_modalidade: List[str] = []
+            erros_consecutivos = 0
             for modalidade in MODALIDADES_CONSULTA:
+                if time.monotonic() >= deadline_at:
+                    erros_modalidade.append("tempo maximo por municipio atingido durante consultas por proposta")
+                    break
+                if erros_consecutivos >= MAX_ERROS_MODALIDADE:
+                    erros_modalidade.append("muitas falhas seguidas por modalidade; municipio interrompido para evitar travamento")
+                    break
                 try:
+                    antes = len(rows)
                     rows.extend(
                         _iter_pages(
                             API_CONSULTA_PROPOSTA,
@@ -720,9 +747,13 @@ def buscar_municipio_api(municipio: Dict[str, str], status_value: str, q: str) -
                                 "uf": uf,
                                 "codigoMunicipioIbge": codigo_ibge,
                             },
+                            deadline_at=deadline_at,
                         )
                     )
+                    if len(rows) > antes:
+                        erros_consecutivos = 0
                 except Exception as exc_modalidade:
+                    erros_consecutivos += 1
                     if _is_request_rejected_error(exc_modalidade):
                         erro_proposta = "PNCP rejeitou temporariamente a consulta por excesso/bloqueio de requisicoes"
                         erros_modalidade.append("PNCP rejeitou temporariamente consultas por modalidade")
@@ -736,7 +767,7 @@ def buscar_municipio_api(municipio: Dict[str, str], status_value: str, q: str) -
                 if _is_request_rejected_error(erro_proposta):
                     erros.append(f"{nome_municipio} / {uf}: {erro_proposta}. Tente novamente em alguns minutos.")
                 elif erro_proposta:
-                    rows_publicacao, erros_publicacao = _buscar_publicacao_municipio(uf, codigo_ibge)
+                    rows_publicacao, erros_publicacao = _buscar_publicacao_municipio(uf, codigo_ibge, deadline_at)
                     rows = rows_publicacao
                     aplicar_filtro_publicacao = True
                     if not rows_publicacao and erros_publicacao:
@@ -744,7 +775,7 @@ def buscar_municipio_api(municipio: Dict[str, str], status_value: str, q: str) -
                         prefixo = f"{erro_proposta}; " if erro_proposta else ""
                         erros.append(f"{nome_municipio} / {uf}: {prefixo}recuperacao por publicacao falhou; {detalhe}")
         else:
-            rows, erros_publicacao = _buscar_publicacao_municipio(uf, codigo_ibge)
+            rows, erros_publicacao = _buscar_publicacao_municipio(uf, codigo_ibge, deadline_at)
             if not rows and erros_publicacao:
                 detalhe = "; ".join(erros_publicacao[:3])
                 erros.append(f"{nome_municipio} / {uf}: consulta por publicacao falhou; {detalhe}")
