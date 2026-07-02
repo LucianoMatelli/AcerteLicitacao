@@ -7,9 +7,7 @@ import html
 import io
 import json
 import os
-import random
 import re
-import threading
 import time
 import unicodedata
 from datetime import datetime, timedelta
@@ -45,16 +43,10 @@ API_CONSULTA_PUBLICACAO = API_CONSULTA_BASE + "/contratacoes/publicacao"
 API_IBGE_MUNICIPIOS_UF = "https://servicodados.ibge.gov.br/api/v1/localidades/estados/{uf}/municipios"
 
 HEADERS = {
-    # O WAF (F5/BIG-IP) do PNCP tende a rejeitar User-Agents "de script".
-    # Headers equivalentes aos enviados pelo proprio portal reduzem falsos positivos.
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": "AcerteLicitacoes/2.0 (+streamlit)",
     "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-    "Referer": "https://pncp.gov.br/app/editais",
-    "Connection": "keep-alive",
+    "Accept-Language": "pt-BR,pt;q=0.9",
+    "Referer": "https://pncp.gov.br/api/consulta/swagger-ui/index.html",
 }
 
 STATUS_LABELS = [
@@ -124,101 +116,25 @@ def _secret_int(name: str, default: int, min_value: int = 1, max_value: Optional
     return value
 
 
-# O manual do PNCP permite tamanhoPagina de ate 500 registros nos endpoints de
-# consulta. Usar 500 (em vez de 50) reduz em ~10x o numero de requisicoes, que
-# e o principal gatilho do bloqueio do WAF.
-PAGE_SIZE_API = _secret_int("PNCP_API_TAMANHO_PAGINA", 500, 10, 500)
-MAX_PAGES_API = _secret_int("PNCP_API_MAX_PAGINAS", 20, 1, 200)
-# Paginas de 500 registros demoram mais para serem servidas; timeout maior.
-TIMEOUT_API = _secret_int("PNCP_API_TIMEOUT", 25, 5, 90)
+PAGE_SIZE_API = _secret_int("PNCP_API_TAMANHO_PAGINA", 50, 10, 50)
+MAX_PAGES_API = _secret_int("PNCP_API_MAX_PAGINAS", 15, 1, 200)
+TIMEOUT_API = _secret_int("PNCP_API_TIMEOUT", 8, 3, 10)
 PROPOSTA_DIAS_A_FRENTE = _secret_int("PNCP_API_PROPOSTA_DIAS_A_FRENTE", 45, 1, 365)
 PUBLICACAO_DIAS_LOOKBACK = _secret_int("PNCP_API_PUBLICACAO_DIAS_LOOKBACK", 365, 1, 365)
-API_RETRIES = _secret_int("PNCP_API_RETRIES", 3, 1, 5)
-# Intervalo minimo entre requisicoes consecutivas ao PNCP (com jitter).
-API_DELAY_MS = _secret_int("PNCP_API_DELAY_MS", 400, 0, 5000)
+API_RETRIES = _secret_int("PNCP_API_RETRIES", 2, 1, 2)
+API_DELAY_MS = _secret_int("PNCP_API_DELAY_MS", 250, 0, 1000)
 MUNICIPIOS_POR_LOTE = _secret_int("PNCP_API_MUNICIPIOS_POR_LOTE", 1, 1, 5)
-TEMPO_MAX_MUNICIPIO = _secret_int("PNCP_API_TEMPO_MAX_MUNICIPIO", 90, 15, 300)
+TEMPO_MAX_MUNICIPIO = _secret_int("PNCP_API_TEMPO_MAX_MUNICIPIO", 45, 15, 180)
 MAX_ERROS_MODALIDADE = _secret_int("PNCP_API_MAX_ERROS_MODALIDADE", 3, 1, 13)
-# TTL do cache das respostas do PNCP: pesquisas repetidas (ou municipios da
-# mesma UF) nao geram novas requisicoes dentro desta janela.
-CACHE_TTL_API = _secret_int("PNCP_API_CACHE_TTL", 900, 60, 86400)
-# Pausa automatica quando o WAF rejeita uma requisicao, antes de continuar.
-WAF_COOLDOWN_SEGUNDOS = _secret_int("PNCP_API_WAF_COOLDOWN", 45, 10, 600)
 
 
 class PncpRequestRejected(RuntimeError):
     pass
 
 
-WAF_HINTS = ("request rejected", "support id", "the requested url was rejected")
-
-
 def _is_request_rejected_error(exc: Exception | str) -> bool:
     text = str(exc).lower()
     return "request_rejected" in text or "rejeitou temporariamente" in text
-
-
-def _looks_like_waf_block(status_code: int, body_lower: str, content_type: str) -> bool:
-    if status_code in (403, 406, 429, 501):
-        return True
-    if any(hint in body_lower for hint in WAF_HINTS):
-        return True
-    # Resposta HTML onde se esperava JSON e um sintoma classico da pagina de
-    # bloqueio do F5/BIG-IP.
-    if status_code == 200 and "text/html" in content_type and "<html" in body_lower:
-        return True
-    return False
-
-
-@st.cache_resource(show_spinner=False)
-def _http_session() -> requests.Session:
-    """Sessao unica com keep-alive: reutiliza conexoes TCP/TLS.
-
-    Alem de acelerar as consultas, um cliente que mantem a conexao aberta se
-    comporta como um navegador e gera menos suspeita no WAF do que centenas de
-    handshakes independentes.
-    """
-    session = requests.Session()
-    session.headers.update(HEADERS)
-    adapter = requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=8)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
-
-
-_pace_lock = threading.Lock()
-_last_request_ts = 0.0
-
-
-def _pace_requests() -> None:
-    """Garante intervalo minimo (com jitter) entre requisicoes ao PNCP."""
-    global _last_request_ts
-    min_interval = API_DELAY_MS / 1000.0
-    if min_interval <= 0:
-        return
-    with _pace_lock:
-        now = time.monotonic()
-        wait = (_last_request_ts + min_interval) - now
-        if wait > 0:
-            time.sleep(wait + random.uniform(0, min_interval * 0.5))
-        _last_request_ts = time.monotonic()
-
-
-def _waf_cooldown_restante() -> float:
-    try:
-        until = float(st.session_state.get("waf_cooldown_until") or 0.0)
-    except Exception:
-        return 0.0
-    return max(0.0, until - time.time())
-
-
-def _registrar_waf_cooldown(segundos: Optional[float] = None) -> None:
-    try:
-        st.session_state["waf_cooldown_until"] = time.time() + float(
-            segundos if segundos is not None else WAF_COOLDOWN_SEGUNDOS
-        )
-    except Exception:
-        pass
 
 
 def _fmt_dt_iso_to_br(value: str) -> str:
@@ -574,41 +490,27 @@ def _items_from_api(js) -> List[Dict]:
 
 
 def _get_api_page(url: str, params: Dict[str, object]) -> Tuple[List[Dict], int]:
-    session = _http_session()
     last_error: Optional[Exception] = None
-
     for attempt in range(API_RETRIES):
         try:
-            _pace_requests()
-            r = session.get(url, params=params, timeout=TIMEOUT_API)
+            if API_DELAY_MS > 0:
+                time.sleep(API_DELAY_MS / 1000)
+            r = requests.get(url, params=params, headers=HEADERS, timeout=TIMEOUT_API)
             body = (r.text or "").strip()
             body_lower = body.lower()
-            content_type = _safe_text(r.headers.get("content-type")).lower()
-
-            if _looks_like_waf_block(r.status_code, body_lower, content_type):
-                retry_after = 0.0
-                try:
-                    retry_after = float(r.headers.get("Retry-After") or 0)
-                except Exception:
-                    retry_after = 0.0
-                if attempt < API_RETRIES - 1:
-                    # Backoff exponencial com jitter; respeita Retry-After se enviado.
-                    espera = max(retry_after, 4.0 * (2 ** attempt)) + random.uniform(0.5, 2.0)
-                    time.sleep(espera)
-                    continue
-                _registrar_waf_cooldown(max(retry_after, WAF_COOLDOWN_SEGUNDOS))
+            if r.status_code == 429 or "request rejected" in body_lower or "support id" in body_lower:
                 raise PncpRequestRejected(
                     f"request_rejected: PNCP rejeitou temporariamente a requisicao HTTP {r.status_code}"
                 )
 
             if r.status_code >= 500 and attempt < API_RETRIES - 1:
-                time.sleep(1.0 * (attempt + 1) + random.uniform(0, 0.5))
+                time.sleep(0.6 * (attempt + 1))
                 continue
 
             if r.status_code in (204, 404):
                 return [], 0
             if r.status_code >= 400:
-                raise RuntimeError(f"HTTP {r.status_code}: {body[:180]}")
+                raise RuntimeError(f"HTTP {r.status_code}: {(r.text or '')[:180]}")
 
             if not body:
                 return [], 0
@@ -618,10 +520,11 @@ def _get_api_page(url: str, params: Dict[str, object]) -> Tuple[List[Dict], int]
             except Exception as exc:
                 last_error = exc
                 if attempt < API_RETRIES - 1:
-                    time.sleep(1.0 * (attempt + 1) + random.uniform(0, 0.5))
+                    time.sleep(0.6 * (attempt + 1))
                     continue
+                ctype = _safe_text(r.headers.get("content-type"))
                 raise RuntimeError(
-                    f"invalid_json HTTP {r.status_code} content-type {content_type}: {body[:180]}"
+                    f"invalid_json HTTP {r.status_code} content-type {ctype}: {body[:180]}"
                 ) from exc
 
             total_pages = 0
@@ -631,12 +534,16 @@ def _get_api_page(url: str, params: Dict[str, object]) -> Tuple[List[Dict], int]
                 except Exception:
                     total_pages = 0
             return _items_from_api(js), total_pages
-        except PncpRequestRejected:
+        except PncpRequestRejected as exc:
+            last_error = exc
+            if attempt < API_RETRIES - 1:
+                time.sleep(3.0 * (attempt + 1))
+                continue
             raise
         except Exception as exc:
             last_error = exc
             if attempt < API_RETRIES - 1:
-                time.sleep(1.0 * (attempt + 1) + random.uniform(0, 0.5))
+                time.sleep(0.6 * (attempt + 1))
                 continue
             raise RuntimeError(f"request_error: {exc}") from exc
 
@@ -659,61 +566,6 @@ def _iter_pages(url: str, base_params: Dict[str, object], deadline_at: Optional[
         if total_pages and page >= total_pages:
             break
     return items
-
-
-# --------------------------------------------------------------------------
-# Fetchers com cache (st.cache_data). O cache e a defesa mais eficaz contra o
-# WAF: dentro do TTL, repetir a pesquisa ou consultar outro municipio da mesma
-# UF nao gera nenhuma requisicao nova ao PNCP.
-# --------------------------------------------------------------------------
-@st.cache_data(ttl=CACHE_TTL_API, show_spinner=False, max_entries=512)
-def _fetch_proposta_uf(uf: str, modalidade: int, data_final: str) -> List[Dict]:
-    """Contratacoes com propostas em aberto para a UF inteira.
-
-    Consultar por UF (e filtrar os municipios no cliente) substitui ate 25
-    consultas por municipio por uma unica consulta por modalidade — a maior
-    reducao possivel no volume de requisicoes.
-    """
-    return _iter_pages(
-        API_CONSULTA_PROPOSTA,
-        {
-            "dataFinal": data_final,
-            "codigoModalidadeContratacao": modalidade,
-            "uf": uf,
-        },
-    )
-
-
-@st.cache_data(ttl=CACHE_TTL_API, show_spinner=False, max_entries=2048)
-def _fetch_publicacao_municipio(
-    uf: str, codigo_ibge: str, modalidade: int, data_inicial: str, data_final: str
-) -> List[Dict]:
-    """Contratacoes publicadas no periodo para um municipio especifico.
-
-    A consulta por publicacao cobre um periodo longo (lookback); manter o filtro
-    de municipio no servidor evita paginar dezenas de milhares de registros de
-    uma UF inteira. Com tamanhoPagina=500, o custo por municipio ja e baixo.
-    """
-    return _iter_pages(
-        API_CONSULTA_PUBLICACAO,
-        {
-            "dataInicial": data_inicial,
-            "dataFinal": data_final,
-            "codigoModalidadeContratacao": modalidade,
-            "uf": uf,
-            "codigoMunicipioIbge": codigo_ibge,
-        },
-    )
-
-
-def _item_codigos_ibge(item: Dict) -> set:
-    codigos = set()
-    for unidade in (item.get("unidadeOrgao"), item.get("unidadeSubRogada")):
-        if isinstance(unidade, dict):
-            codigo = _safe_text(unidade.get("codigoIbge"))
-            if codigo:
-                codigos.add(codigo)
-    return codigos
 
 
 def _status_match_publicacao(item: Dict, status_value: str) -> bool:
@@ -762,9 +614,21 @@ def _buscar_publicacao_municipio(
             erros.append("muitas falhas seguidas por modalidade; municipio interrompido para evitar travamento")
             break
         try:
-            novos = _fetch_publicacao_municipio(uf, codigo_ibge, modalidade, data_inicial, data_final)
-            rows.extend(novos)
-            erros_consecutivos = 0
+            antes = len(rows)
+            rows.extend(
+                _iter_pages(
+                    API_CONSULTA_PUBLICACAO,
+                    {
+                        "dataInicial": data_inicial,
+                        "dataFinal": data_final,
+                        "codigoModalidadeContratacao": modalidade,
+                        "uf": uf,
+                        "codigoMunicipioIbge": codigo_ibge,
+                    },
+                    deadline_at=deadline_at,
+                )
+            )
+            erros_consecutivos = 0 if len(rows) > antes else erros_consecutivos
         except Exception as exc:
             erros_consecutivos += 1
             if _is_request_rejected_error(exc):
@@ -873,14 +737,21 @@ def buscar_municipio_api(municipio: Dict[str, str], status_value: str, q: str) -
                     erros_modalidade.append("muitas falhas seguidas por modalidade; municipio interrompido para evitar travamento")
                     break
                 try:
-                    # Consulta pela UF inteira (cacheada); o filtro por municipio
-                    # e feito localmente. Municipios seguintes da mesma UF saem
-                    # do cache sem nenhuma requisicao nova ao PNCP.
-                    uf_rows = _fetch_proposta_uf(uf, modalidade, data_final)
+                    antes = len(rows)
                     rows.extend(
-                        item for item in uf_rows if codigo_ibge in _item_codigos_ibge(item)
+                        _iter_pages(
+                            API_CONSULTA_PROPOSTA,
+                            {
+                                "dataFinal": data_final,
+                                "codigoModalidadeContratacao": modalidade,
+                                "uf": uf,
+                                "codigoMunicipioIbge": codigo_ibge,
+                            },
+                            deadline_at=deadline_at,
+                        )
                     )
-                    erros_consecutivos = 0
+                    if len(rows) > antes:
+                        erros_consecutivos = 0
                 except Exception as exc_modalidade:
                     erros_consecutivos += 1
                     if _is_request_rejected_error(exc_modalidade):
@@ -1045,18 +916,6 @@ def _processar_lote_busca_incremental() -> Optional[Tuple[List[Dict], List[str]]
     cidade_atual = ", ".join(
         f"{_safe_text(m.get('nome'))}/{_safe_text(m.get('uf')).upper()}" for m in lote if isinstance(m, dict)
     )
-
-    # Se o WAF do PNCP rejeitou uma requisicao recente, aguarda o cooldown antes
-    # de prosseguir — continuar insistindo prolonga o bloqueio.
-    cooldown = _waf_cooldown_restante()
-    if cooldown > 0:
-        st.info(
-            f"O PNCP bloqueou temporariamente as consultas (WAF). "
-            f"Aguardando {int(cooldown) + 1}s antes de continuar automaticamente..."
-        )
-        st.progress(next_index / total)
-        time.sleep(min(cooldown, 5.0))
-        st.rerun()
 
     progress_container = st.container()
     with progress_container:
